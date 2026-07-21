@@ -14,31 +14,39 @@ def st_canvas_safe(fill_color, stroke_width, stroke_color, background_image,
                     height, width, drawing_mode, initial_drawing, key):
     """streamlit-drawable-canvas(-fix) 內部用 image_to_url 轉換背景圖網址，
     在部分情況下會回傳空字串，導致背景圖顯示不出來（畫布變全白）。
-    這裡改成自己把圖片轉成 base64 data URI 直接傳給底層元件，不依賴那段容易出包的轉換機制。"""
+    這裡改成自己把圖片轉成 base64 data URI 直接傳給底層元件，不依賴那段容易出包的轉換機制。
+    背景圖用 JPEG 壓縮（而不是 PNG），大幅減少資料量，避免元件因資料量過大而整個載入失敗。
+    注意：這裡不會再調整圖片尺寸——尺寸必須跟呼叫端算面積、畫結果圖用的 disp_img 完全一致，
+    才不會讓畫布上的座標跟後續面積計算的座標系統對不起來。"""
     buf = io.BytesIO()
-    background_image.save(buf, format="PNG")
+    background_image.convert("RGB").save(buf, format="JPEG", quality=80, optimize=True)
     b64 = base64.b64encode(buf.getvalue()).decode()
-    background_image_url = f"data:image/png;base64,{b64}"
+    background_image_url = f"data:image/jpeg;base64,{b64}"
 
     initial_drawing = {"version": "4.4.0"} if initial_drawing is None else dict(initial_drawing)
     initial_drawing["background"] = ""
 
-    component_value = _sdc_module._component_func(
-        fillColor=fill_color,
-        strokeWidth=stroke_width,
-        strokeColor=stroke_color,
-        backgroundColor="",
-        backgroundImageURL=background_image_url,
-        realtimeUpdateStreamlit=(drawing_mode != "polygon"),
-        canvasHeight=height,
-        canvasWidth=width,
-        drawingMode=drawing_mode,
-        initialDrawing=initial_drawing,
-        displayToolbar=True,
-        displayRadius=3,
-        key=key,
-        default=None,
-    )
+    try:
+        component_value = _sdc_module._component_func(
+            fillColor=fill_color,
+            strokeWidth=stroke_width,
+            strokeColor=stroke_color,
+            backgroundColor="",
+            backgroundImageURL=background_image_url,
+            realtimeUpdateStreamlit=(drawing_mode != "polygon"),
+            canvasHeight=height,
+            canvasWidth=width,
+            drawingMode=drawing_mode,
+            initialDrawing=initial_drawing,
+            displayToolbar=True,
+            displayRadius=3,
+            key=key,
+            default=None,
+        )
+    except Exception as e:
+        st.error(f"畫布元件載入失敗：{e}")
+        return CanvasResult()
+
     if component_value is None:
         return CanvasResult()
     return CanvasResult(
@@ -230,9 +238,19 @@ if uploaded:
     if not is_pdf:
         st.info("圖片檔沒有內建的解析度資訊，面積換算的準確度會比 PDF 差，建議優先使用 PDF。")
 
-    # ── 縮放圖片以適合畫布顯示 ──────────────────────────
+    # ── 縮放圖片以適合畫布顯示，並確保資料量不會大到讓畫布元件整個載入失敗 ──────────
     display_scale = min(1.0, MAX_CANVAS_WIDTH / img.width)
     disp_img = img.resize((int(img.width * display_scale), int(img.height * display_scale)))
+
+    # 檢查壓縮後的資料量，太大就再縮小一次尺寸（在這裡一次決定好，後面所有計算都用這個最終尺寸）
+    MAX_JPEG_BYTES = 1_500_000
+    check_buf = io.BytesIO()
+    disp_img.convert("RGB").save(check_buf, format="JPEG", quality=80, optimize=True)
+    if len(check_buf.getvalue()) > MAX_JPEG_BYTES:
+        shrink_factor = 0.7
+        disp_img = disp_img.resize((int(disp_img.width * shrink_factor), int(disp_img.height * shrink_factor)))
+        display_scale *= shrink_factor
+        st.caption("（圖面內容較複雜，已自動縮小顯示尺寸以確保畫布能正常載入）")
 
     # ── 換算係數：顯示像素 → 實際公尺 ──────────────────────────
     m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
