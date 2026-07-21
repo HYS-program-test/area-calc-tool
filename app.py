@@ -3,11 +3,48 @@ import numpy as np
 import cv2
 from PIL import Image
 import fitz  # PyMuPDF
-from streamlit_drawable_canvas import st_canvas
+import streamlit_drawable_canvas as _sdc_module
+from streamlit_drawable_canvas import CanvasResult
 import re
 import io
 import base64
 import anthropic
+
+def st_canvas_safe(fill_color, stroke_width, stroke_color, background_image,
+                    height, width, drawing_mode, initial_drawing, key):
+    """streamlit-drawable-canvas(-fix) 內部用 image_to_url 轉換背景圖網址，
+    在部分情況下會回傳空字串，導致背景圖顯示不出來（畫布變全白）。
+    這裡改成自己把圖片轉成 base64 data URI 直接傳給底層元件，不依賴那段容易出包的轉換機制。"""
+    buf = io.BytesIO()
+    background_image.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    background_image_url = f"data:image/png;base64,{b64}"
+
+    initial_drawing = {"version": "4.4.0"} if initial_drawing is None else dict(initial_drawing)
+    initial_drawing["background"] = ""
+
+    component_value = _sdc_module._component_func(
+        fillColor=fill_color,
+        strokeWidth=stroke_width,
+        strokeColor=stroke_color,
+        backgroundColor="",
+        backgroundImageURL=background_image_url,
+        realtimeUpdateStreamlit=(drawing_mode != "polygon"),
+        canvasHeight=height,
+        canvasWidth=width,
+        drawingMode=drawing_mode,
+        initialDrawing=initial_drawing,
+        displayToolbar=True,
+        displayRadius=3,
+        key=key,
+        default=None,
+    )
+    if component_value is None:
+        return CanvasResult()
+    return CanvasResult(
+        np.asarray(_sdc_module._data_url_to_image(component_value["data"])),
+        component_value["raw"],
+    )
 
 st.set_page_config(page_title="平面圖面積計算工具", page_icon="📐", layout="wide")
 
@@ -218,7 +255,10 @@ if uploaded:
         st.session_state["final_overlay"] = None
         st.session_state["claude_review"] = None
 
-    show_auto = st.checkbox("顯示自動偵測的候選邊界（草稿，可再手動調整／刪除）", value=True)
+    show_auto = st.checkbox(
+        "顯示自動偵測的候選邊界（草稿，品質不穩定，門窗多的圖面容易誤判，建議先手動框選為主）",
+        value=False,
+    )
     min_area_filter = st.slider("自動偵測最小面積門檻（m²）", 1.0, 30.0, DEFAULT_MIN_AREA_M2, 0.5)
 
     if min_area_filter != DEFAULT_MIN_AREA_M2:
@@ -236,12 +276,11 @@ if uploaded:
     mode_choice = st.radio("畫布模式", ["🖊️ 多邊形（新增）", "✋ 選取／調整（移動、刪除）"], horizontal=True)
     drawing_mode = "polygon" if mode_choice.startswith("🖊️") else "transform"
 
-    canvas_result = st_canvas(
+    canvas_result = st_canvas_safe(
         fill_color="rgba(255,99,71,0.25)",
         stroke_width=3,
         stroke_color="#FF6347",
         background_image=disp_img,
-        update_streamlit=True,
         height=disp_img.height,
         width=disp_img.width,
         drawing_mode=drawing_mode,
