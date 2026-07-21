@@ -3,77 +3,37 @@ import numpy as np
 import cv2
 from PIL import Image
 import fitz  # PyMuPDF
-import streamlit_drawable_canvas as _sdc_module
-from streamlit_drawable_canvas import CanvasResult
+from streamlit_image_coordinates import streamlit_image_coordinates
 import re
 import io
 import base64
 import anthropic
 
-def st_canvas_safe(fill_color, stroke_width, stroke_color, background_image,
-                    height, width, drawing_mode, initial_drawing, key):
-    """streamlit-drawable-canvas(-fix) 內部用 image_to_url 轉換背景圖網址，
-    在部分情況下會回傳空字串，導致背景圖顯示不出來（畫布變全白）。
-    這裡改成自己把圖片轉成 base64 data URI 直接傳給底層元件，不依賴那段容易出包的轉換機制。
-    背景圖用 JPEG 壓縮（而不是 PNG），大幅減少資料量，避免元件因資料量過大而整個載入失敗。
-    注意：這裡不會再調整圖片尺寸——尺寸必須跟呼叫端算面積、畫結果圖用的 disp_img 完全一致，
-    才不會讓畫布上的座標跟後續面積計算的座標系統對不起來。"""
-    buf = io.BytesIO()
-    background_image.convert("RGB").save(buf, format="JPEG", quality=80, optimize=True)
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    background_image_url = f"data:image/jpeg;base64,{b64}"
-
-    initial_drawing = {"version": "4.4.0"} if initial_drawing is None else dict(initial_drawing)
-    initial_drawing["background"] = ""
-
-    try:
-        component_value = _sdc_module._component_func(
-            fillColor=fill_color,
-            strokeWidth=stroke_width,
-            strokeColor=stroke_color,
-            backgroundColor="",
-            backgroundImageURL=background_image_url,
-            realtimeUpdateStreamlit=(drawing_mode != "polygon"),
-            canvasHeight=height,
-            canvasWidth=width,
-            drawingMode=drawing_mode,
-            initialDrawing=initial_drawing,
-            displayToolbar=True,
-            displayRadius=3,
-            key=key,
-            default=None,
-        )
-    except Exception as e:
-        st.error(f"畫布元件載入失敗：{e}")
-        return CanvasResult()
-
-    if component_value is None:
-        return CanvasResult()
-    return CanvasResult(
-        np.asarray(_sdc_module._data_url_to_image(component_value["data"])),
-        component_value["raw"],
-    )
-
 st.set_page_config(page_title="平面圖面積計算工具", page_icon="📐", layout="wide")
 
 st.title("📐 平面圖面積計算工具")
-st.caption("上傳平面圖 → 系統自動框出候選空間（草稿）→ 手動調整邊界 → 計算實際面積")
+st.caption("上傳平面圖 → 依序點擊房間角點 → 封閉空間 → 計算實際面積")
 
 # ─────────────────────────────────────────────
 # 常數
 # ─────────────────────────────────────────────
 RENDER_DPI = 144          # PDF 轉圖片時的渲染解析度（fitz Matrix(2,2) 基準 72dpi）
-MAX_CANVAS_WIDTH = 1000   # 畫布顯示最大寬度（效能考量，太大畫布會很卡）
-DEFAULT_MIN_AREA_M2 = 5.0 # 自動偵測的最小面積門檻，太小的雜訊區塊會被濾掉
+MAX_CANVAS_WIDTH = 1000   # 顯示圖片最大寬度
 PING_PER_M2 = 3.3058      # 1 坪 = 3.3058 m²
+POLY_COLORS = [
+    (255, 99, 71), (60, 179, 113), (65, 105, 225), (255, 165, 0), (186, 85, 211),
+    (0, 206, 209), (255, 20, 147), (154, 205, 50), (255, 215, 0), (139, 69, 19),
+]
 
 # ─────────────────────────────────────────────
 # Session State 初始化
 # ─────────────────────────────────────────────
 def init_session():
     defaults = {
-        "auto_polygons": None,
         "last_file_key": None,
+        "current_points": [],   # 目前正在點選、尚未封閉的角點
+        "finished_polygons": [],  # 已封閉的空間清單，每個元素是 [(x,y),...]
+        "last_click_xy": None,
         "final_results": None,
         "final_overlay": None,
         "claude_review": None,
@@ -84,6 +44,14 @@ def init_session():
 
 init_session()
 
+def reset_drawing_state():
+    st.session_state["current_points"] = []
+    st.session_state["finished_polygons"] = []
+    st.session_state["last_click_xy"] = None
+    st.session_state["final_results"] = None
+    st.session_state["final_overlay"] = None
+    st.session_state["claude_review"] = None
+
 # ─────────────────────────────────────────────
 # PDF / 圖片 → 可顯示圖片，並嘗試自動偵測比例尺
 # ─────────────────────────────────────────────
@@ -91,14 +59,13 @@ def load_pdf(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = doc[0]
 
-    # 嘗試從文字內容找比例尺標示，例如「1:100」「S=1/100」
     text = page.get_text()
     auto_scale = None
     for pattern in [r'1\s*[:：]\s*(\d+)', r'1\s*/\s*(\d+)']:
         m = re.search(pattern, text)
         if m:
             candidate = int(m.group(1))
-            if 10 <= candidate <= 2000:  # 合理的比例尺範圍，避免抓到不相關的數字
+            if 10 <= candidate <= 2000:
                 auto_scale = candidate
                 break
 
@@ -108,63 +75,37 @@ def load_pdf(pdf_bytes: bytes):
     doc.close()
     return img, auto_scale
 
-def polygon_to_fabric_obj(pts, stroke="#FF6347"):
-    """把 [(x,y),...] 座標轉成 streamlit-drawable-canvas 看得懂的多邊形物件格式"""
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    left, top = min(xs), min(ys)
-    obj_points = [{"x": p[0] - left, "y": p[1] - top} for p in pts]
-    return {
-        "type": "polygon",
-        "left": left, "top": top,
-        "points": obj_points,
-        "fill": "rgba(255,99,71,0.25)",
-        "stroke": stroke,
-        "strokeWidth": 3,
-        "selectable": True,
-    }
-
-def detect_candidate_polygons(disp_img: Image.Image, m2_per_px2_display: float, min_area_m2: float):
-    """在縮放後的顯示圖上跑連通元件分析，抓出候選空間的多邊形頂點（自動偵測草稿）"""
-    gray = cv2.cvtColor(np.array(disp_img), cv2.COLOR_RGB2GRAY)
-    _, ink = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-    ink_d = cv2.dilate(ink, np.ones((2, 2), np.uint8), iterations=1)
-    bg = cv2.bitwise_not(ink_d)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bg, connectivity=4)
-
-    h_disp, w_disp = gray.shape
-    polygons = []
-    for idx in range(1, num_labels):
-        a = stats[idx, cv2.CC_STAT_AREA]
-        area_m2 = a * m2_per_px2_display
-        x, y, ww, hh = (stats[idx, cv2.CC_STAT_LEFT], stats[idx, cv2.CC_STAT_TOP],
-                         stats[idx, cv2.CC_STAT_WIDTH], stats[idx, cv2.CC_STAT_HEIGHT])
-        if area_m2 < min_area_m2:
-            continue
-        if ww > w_disp * 0.9 and hh > h_disp * 0.9:
-            continue  # 幾乎整頁大小，通常是背景縫隙而非真正房間
-        mask = (labels == idx).astype(np.uint8) * 255
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            continue
-        cnt = max(contours, key=cv2.contourArea)
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.01 * peri, True)
-        pts = approx.reshape(-1, 2).tolist()
-        if len(pts) < 3:
-            continue
-        polygons.append(pts)
-    return polygons
-
-def polygon_area_px2(abs_pts):
-    """Shoelace 公式計算多邊形面積（像素平方）"""
-    n = len(abs_pts)
+def polygon_area_px2(pts):
+    """Shoelace 公式計算多邊形面積（像素平方），支援任意不規則多邊形"""
+    n = len(pts)
     area = 0.0
     for j in range(n):
-        x1, y1 = abs_pts[j]
-        x2, y2 = abs_pts[(j + 1) % n]
+        x1, y1 = pts[j]
+        x2, y2 = pts[(j + 1) % n]
         area += x1 * y2 - x2 * y1
     return abs(area) / 2
+
+def draw_working_image(base_img: Image.Image) -> np.ndarray:
+    """把已封閉的空間 + 正在畫的當前空間，疊到底圖上，讓使用者看到目前的進度"""
+    arr = np.array(base_img).copy()
+
+    for i, poly in enumerate(st.session_state["finished_polygons"]):
+        color = POLY_COLORS[i % len(POLY_COLORS)]
+        pts_np = np.array(poly, dtype=np.int32)
+        cv2.polylines(arr, [pts_np], True, color, 3)
+        cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
+        cv2.circle(arr, (cx, cy), 14, color, -1)
+        cv2.putText(arr, str(i + 1), (cx - 7, cy + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+    cur = st.session_state["current_points"]
+    if cur:
+        for p in cur:
+            cv2.circle(arr, (int(p[0]), int(p[1])), 5, (30, 144, 255), -1)
+        if len(cur) > 1:
+            pts_np = np.array(cur, dtype=np.int32)
+            cv2.polylines(arr, [pts_np], False, (30, 144, 255), 2)
+
+    return arr
 
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     """把畫好編號框的圖交給 Claude 視覺辨識，請它幫忙標註每個框對應的空間、
@@ -179,12 +120,12 @@ def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     b64_img = base64.b64encode(buf.getvalue()).decode()
 
     id_list = "、".join(f"#{r['id']}" for r in results)
-    prompt = f"""這是一張建築平面圖，上面已經用彩色編號框（{id_list}）標出自動偵測到的候選空間邊界。
+    prompt = f"""這是一張建築平面圖，上面已經用彩色編號框（{id_list}）標出使用者手動框選的空間邊界。
 
 請你對照原圖，逐一檢查：
 1. 每個編號框，依圖上的文字標示或空間配置，判斷它最可能是什麼空間（例如：房間、走道、樓梯、車道、機房等）；如果無法判斷，寫「無法判斷」
-2. 如果某個編號框的形狀、範圍看起來不像一個真正獨立的空間（例如貫穿多個區域、範圍異常），請標註「⚠️ 疑似非真實空間」
-3. 圖面上有沒有明顯的獨立空間「完全沒被框到」？簡短描述位置（例如：左上角、靠近樓梯旁）
+2. 如果某個編號框的形狀、範圍看起來不像一個真正獨立的空間，請標註「⚠️ 疑似有誤」
+3. 圖面上有沒有明顯的獨立空間「完全沒被框到」？簡短描述位置
 
 請用條列方式回答，每個編號一行，最後補一段「遺漏空間」的說明。"""
 
@@ -220,6 +161,10 @@ if uploaded:
         img = Image.open(uploaded).convert("RGB")
         auto_scale = None
 
+    if st.session_state["last_file_key"] != file_key:
+        reset_drawing_state()
+        st.session_state["last_file_key"] = file_key
+
     # ── 比例尺：自動偵測 + 手動覆蓋 ──────────────────────────
     col_scale1, col_scale2 = st.columns([1, 2])
     with col_scale1:
@@ -238,98 +183,78 @@ if uploaded:
     if not is_pdf:
         st.info("圖片檔沒有內建的解析度資訊，面積換算的準確度會比 PDF 差，建議優先使用 PDF。")
 
-    # ── 縮放圖片以適合畫布顯示，並確保資料量不會大到讓畫布元件整個載入失敗 ──────────
+    # ── 縮放圖片以適合顯示 ──────────────────────────
     display_scale = min(1.0, MAX_CANVAS_WIDTH / img.width)
     disp_img = img.resize((int(img.width * display_scale), int(img.height * display_scale)))
-
-    # 檢查壓縮後的資料量，太大就再縮小一次尺寸（在這裡一次決定好，後面所有計算都用這個最終尺寸）
-    MAX_JPEG_BYTES = 1_500_000
-    check_buf = io.BytesIO()
-    disp_img.convert("RGB").save(check_buf, format="JPEG", quality=80, optimize=True)
-    if len(check_buf.getvalue()) > MAX_JPEG_BYTES:
-        shrink_factor = 0.7
-        disp_img = disp_img.resize((int(disp_img.width * shrink_factor), int(disp_img.height * shrink_factor)))
-        display_scale *= shrink_factor
-        st.caption("（圖面內容較複雜，已自動縮小顯示尺寸以確保畫布能正常載入）")
 
     # ── 換算係數：顯示像素 → 實際公尺 ──────────────────────────
     m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
     if m_per_px_at_render:
         m_per_px_display = m_per_px_at_render / display_scale
-        m2_per_px2_display = m_per_px_display ** 2
     else:
-        # 圖片檔：退而求其次，假設整張圖寬度對應使用者輸入的比例尺概念下的 96 DPI 概估
-        # （準確度較低，建議之後由使用者用「已知長度校正」取代）
         m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
-        m2_per_px2_display = m_per_px_display ** 2
+    m2_per_px2_display = m_per_px_display ** 2
 
-    # ── 自動偵測候選邊界（只在換新檔案時重新跑一次）──────────────────────
-    if st.session_state["last_file_key"] != file_key:
-        st.session_state["auto_polygons"] = detect_candidate_polygons(
-            disp_img, m2_per_px2_display, DEFAULT_MIN_AREA_M2
-        )
-        st.session_state["last_file_key"] = file_key
-        st.session_state["final_results"] = None
-        st.session_state["final_overlay"] = None
-        st.session_state["claude_review"] = None
-
-    show_auto = st.checkbox(
-        "顯示自動偵測的候選邊界（草稿，品質不穩定，門窗多的圖面容易誤判，建議先手動框選為主）",
-        value=False,
-    )
-    min_area_filter = st.slider("自動偵測最小面積門檻（m²）", 1.0, 30.0, DEFAULT_MIN_AREA_M2, 0.5)
-
-    if min_area_filter != DEFAULT_MIN_AREA_M2:
-        filtered_polys = detect_candidate_polygons(disp_img, m2_per_px2_display, min_area_filter)
-    else:
-        filtered_polys = st.session_state["auto_polygons"]
-
-    initial_objs = [polygon_to_fabric_obj(p) for p in filtered_polys] if show_auto else []
-    initial_drawing = {"version": "4.4.0", "objects": initial_objs}
-
+    # ── 操作說明與控制按鈕 ──────────────────────────
     st.markdown(
-        "**在下方圖面上調整邊界：**「多邊形」模式可以逐點點出新的空間（連續點擊描邊、"
-        "雙擊或點回起點結束）；「選取／調整」模式可以點選既有的框，拖曳邊界，或按 Delete 鍵刪除。"
+        "**在下方圖面上依序點擊一個空間的每個角點**（依順序點，形狀不限矩形，L 型、斜牆都可以）；"
+        "點完最後一個角後按「✅ 封閉此空間」，就會記錄成一筆；要框下一個空間，直接接著點新的角點。"
     )
-    mode_choice = st.radio("畫布模式", ["🖊️ 多邊形（新增）", "✋ 選取／調整（移動、刪除）"], horizontal=True)
-    drawing_mode = "polygon" if mode_choice.startswith("🖊️") else "transform"
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
+    with ctrl_col1:
+        if st.button("✅ 封閉此空間", use_container_width=True,
+                      disabled=len(st.session_state["current_points"]) < 3):
+            st.session_state["finished_polygons"].append(st.session_state["current_points"])
+            st.session_state["current_points"] = []
+            st.rerun()
+    with ctrl_col2:
+        if st.button("↩️ 復原上一點", use_container_width=True,
+                      disabled=len(st.session_state["current_points"]) == 0):
+            st.session_state["current_points"].pop()
+            st.rerun()
+    with ctrl_col3:
+        if st.button("🗑️ 清空全部重來", use_container_width=True):
+            reset_drawing_state()
+            st.rerun()
 
-    canvas_result = st_canvas_safe(
-        fill_color="rgba(255,99,71,0.25)",
-        stroke_width=3,
-        stroke_color="#FF6347",
-        background_image=disp_img,
-        height=disp_img.height,
-        width=disp_img.width,
-        drawing_mode=drawing_mode,
-        initial_drawing=initial_drawing,
-        key=f"canvas_{file_key}",
-    )
+    st.caption(f"目前正在點選的空間：{len(st.session_state['current_points'])} 個角點　｜　已封閉空間：{len(st.session_state['finished_polygons'])} 個")
 
-    # ── 計算面積 ──────────────────────────
-    if st.button("📐 計算面積", type="primary", use_container_width=True):
-        objs = []
-        if canvas_result.json_data is not None:
-            objs = canvas_result.json_data.get("objects", [])
+    # ── 顯示圖片並擷取點擊座標 ──────────────────────────
+    working_img = draw_working_image(disp_img)
+    click = streamlit_image_coordinates(working_img, key=f"clicker_{file_key}")
 
+    if click is not None:
+        xy = (click["x"], click["y"])
+        if xy != st.session_state["last_click_xy"]:
+            st.session_state["last_click_xy"] = xy
+            st.session_state["current_points"].append(xy)
+            st.rerun()
+
+    # ── 已封閉空間清單（可個別刪除）──────────────────────────
+    if st.session_state["finished_polygons"]:
+        st.markdown("**已封閉的空間：**")
+        for i, poly in enumerate(st.session_state["finished_polygons"]):
+            area_m2 = polygon_area_px2(poly) * m2_per_px2_display
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                st.write(f"🔷 #{i+1}　約 {area_m2:.2f} m²（{len(poly)} 個角點）")
+            with c2:
+                if st.button("刪除", key=f"del_poly_{i}"):
+                    st.session_state["finished_polygons"].pop(i)
+                    st.rerun()
+
+    # ── 計算面積（正式輸出結果圖）──────────────────────────
+    if st.button("📐 產出面積標示結果", type="primary", use_container_width=True,
+                  disabled=len(st.session_state["finished_polygons"]) == 0):
         results = []
         overlay = np.array(disp_img).copy()
-        for i, obj in enumerate(objs):
-            if obj.get("type") != "polygon":
-                continue
-            left, top = obj.get("left", 0), obj.get("top", 0)
-            scale_x, scale_y = obj.get("scaleX", 1), obj.get("scaleY", 1)
-            pts = obj.get("points", [])
-            abs_pts = [(left + p["x"] * scale_x, top + p["y"] * scale_y) for p in pts]
-            if len(abs_pts) < 3:
-                continue
+        for i, poly in enumerate(st.session_state["finished_polygons"]):
+            area_m2 = polygon_area_px2(poly) * m2_per_px2_display
+            results.append({"id": i + 1, "area_m2": area_m2, "points": poly})
 
-            area_px2 = polygon_area_px2(abs_pts)
-            area_m2 = area_px2 * m2_per_px2_display
-            results.append({"id": i + 1, "area_m2": area_m2, "points": abs_pts})
-
-            pts_np = np.array(abs_pts, dtype=np.int32)
-            cv2.polylines(overlay, [pts_np], True, (255, 99, 71), 3)
+            color = POLY_COLORS[i % len(POLY_COLORS)]
+            pts_np = np.array(poly, dtype=np.int32)
+            cv2.polylines(overlay, [pts_np], True, color, 3)
             cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
             label = f"#{i+1} {area_m2:.1f}m2"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
