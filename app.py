@@ -244,15 +244,25 @@ if uploaded:
     m2_per_px2_display = m_per_px_display ** 2
     current_color_bgr = hex_to_bgr(shape_color_hex)
 
-    # ── 圖面：主要區域，全寬顯示 ──────────────────────────
+    # ── 圖面：主要區域，撐滿可用寬度顯示（不留右側空白）──────────────────────
     working_arr = draw_all(disp_arr_base, draw_mode, current_color_bgr)
     click = streamlit_image_coordinates(
         working_arr, key=f"clicker_{draw_mode}_{file_key}",
         click_and_drag=False, image_format="JPEG",
+        use_column_width="always",
     )
 
     if click is not None and "x" in click:
-        xy = (click["x"], click["y"])
+        # 圖片撐滿寬度顯示時，點擊回傳的是「顯示尺寸」座標，要換算回「圖片原始像素」座標，
+        # 否則面積計算會用錯比例尺
+        disp_w = click.get("width") or disp_img.width
+        disp_h = click.get("height") or disp_img.height
+        scale_x = disp_img.width / disp_w if disp_w else 1
+        scale_y = disp_img.height / disp_h if disp_h else 1
+        real_x = click["x"] * scale_x
+        real_y = click["y"] * scale_y
+
+        xy = (real_x, real_y)
         if xy != st.session_state["last_click_xy"]:
             st.session_state["last_click_xy"] = xy
             st.session_state["current_points"].append(xy)
