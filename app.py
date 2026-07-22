@@ -349,98 +349,117 @@ if uploaded:
         img = load_image_cached(file_bytes)
         auto_scale = None
 
-    if st.session_state["last_file_key"] != file_key:
+    is_new_file = st.session_state["last_file_key"] != file_key
+    if is_new_file:
         reset_drawing_state()
         st.session_state["last_file_key"] = file_key
+    else:
+        # 不是新上傳的檔案，才需要從瀏覽器同步目前畫布的最新狀態，
+        # 這樣切換「矩形／多邊形／選取」模式、換顏色時，才不會把剛畫好的框弄丟
+        # （剛切換新檔案時故意跳過，否則會把「上一份圖」殘留在瀏覽器裡的舊資料誤帶進來）
+        raw = st_javascript("await new Promise(r => r(window.localStorage.getItem('area_calc_shapes_v1')));")
+        if raw and raw != 0:
+            try:
+                st.session_state["finished_shapes"] = json.loads(raw)
+            except Exception:
+                pass
 
     img_cropped = crop_to_content_cached(img, file_key)
 
-    col_scale1, col_scale2 = st.columns([1, 2])
-    with col_scale1:
-        if auto_scale:
-            st.success(f"✅ 自動偵測到比例尺 1:{auto_scale}（可在右方修正）")
-        elif is_pdf:
-            st.warning("⚠️ 未在圖面文字中偵測到比例尺，請手動輸入")
+    st.divider()
+    left_col, right_col = st.columns([2.2, 1])
+
+    with left_col:
+        col_scale1, col_scale2 = st.columns([1, 1.3])
+        with col_scale1:
+            if auto_scale:
+                st.success(f"✅ 自動偵測比例尺 1:{auto_scale}")
+            elif is_pdf:
+                st.warning("⚠️ 未偵測到比例尺，請手動輸入")
+            else:
+                st.warning("⚠️ 圖片檔請手動輸入比例尺")
+        with col_scale2:
+            scale_ratio = st.number_input(
+                "比例尺（1:N，輸入 N）", min_value=1, value=auto_scale or 100, step=10,
+                label_visibility="collapsed",
+            )
+
+        disp_img, display_scale = resize_display_cached(img_cropped, file_key, MAX_CANVAS_WIDTH)
+
+        m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
+        if m_per_px_at_render:
+            m_per_px_display = m_per_px_at_render / display_scale
         else:
-            st.warning("⚠️ 圖片檔無法自動偵測比例尺，請手動輸入")
-    with col_scale2:
-        scale_ratio = st.number_input(
-            "比例尺（輸入 1:N 裡的 N）", min_value=1, value=auto_scale or 100, step=10,
-        )
+            m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
+        m2_per_px2_display = m_per_px_display ** 2
 
-    disp_img, display_scale = resize_display_cached(img_cropped, file_key, MAX_CANVAS_WIDTH)
+        tool_col1, tool_col2 = st.columns([2, 1])
+        with tool_col1:
+            draw_mode = st.radio("框選模式", ["矩形", "多邊形", "選取／調整"], horizontal=True,
+                                  help="矩形：拖曳即時畫出矩形。多邊形：依序點角點，點回起點附近自動封閉。選取／調整：拖曳移動、拉角點縮放，按 Delete 刪除選取的框。")
+        with tool_col2:
+            shape_color_hex = st.color_picker("新框的顏色", DEFAULT_COLOR)
 
-    m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
-    if m_per_px_at_render:
-        m_per_px_display = m_per_px_at_render / display_scale
-    else:
-        m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
-    m2_per_px2_display = m_per_px_display ** 2
+        mode_map = {"矩形": "rect", "多邊形": "polygon", "選取／調整": "select"}
+        render_canvas(disp_img, st.session_state["finished_shapes"], mode_map[draw_mode], shape_color_hex, disp_img.height)
 
-    # ── 工具列 ──────────────────────────
-    tool_col1, tool_col2, tool_col3, tool_col4 = st.columns([1.6, 1, 1, 1.3])
-    with tool_col1:
-        draw_mode = st.radio("框選模式", ["矩形", "多邊形", "選取／調整"], horizontal=True,
-                              help="矩形：拖曳即時畫出矩形。多邊形：依序點角點，點回起點附近自動封閉。選取／調整：拖曳移動、拉角點縮放，按 Delete 刪除選取的框。")
-    with tool_col2:
-        shape_color_hex = st.color_picker("新框的顏色", DEFAULT_COLOR)
-    with tool_col3:
-        if st.button("🔄 同步目前框選狀態", use_container_width=True,
-                      help="在畫布上畫完/調整完之後，按這裡把最新結果帶回來計算面積"):
-            raw = st_javascript("await new Promise(r => r(window.localStorage.getItem('area_calc_shapes_v1')));")
-            if raw and raw != 0:
-                try:
-                    st.session_state["finished_shapes"] = json.loads(raw)
-                except Exception:
-                    st.warning("同步失敗，請再試一次")
-            st.rerun()
-    with tool_col4:
-        if st.button("🗑️ 清空全部重來", use_container_width=True):
-            reset_drawing_state()
-            st.rerun()
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            if st.button("📐 計算框選面積", type="primary", use_container_width=True,
+                          help="把畫布上目前的框選結果讀進來，重新計算面積"):
+                raw = st_javascript("await new Promise(r => r(window.localStorage.getItem('area_calc_shapes_v1')));")
+                if raw and raw != 0:
+                    try:
+                        st.session_state["finished_shapes"] = json.loads(raw)
+                    except Exception:
+                        st.warning("讀取失敗，請再按一次")
+                st.rerun()
+        with btn_col2:
+            if st.button("🗑️ 清空全部重來", use_container_width=True):
+                reset_drawing_state()
+                st.rerun()
 
-    mode_map = {"矩形": "rect", "多邊形": "polygon", "選取／調整": "select"}
-    render_canvas(disp_img, st.session_state["finished_shapes"], mode_map[draw_mode], shape_color_hex, disp_img.height)
-
-    st.caption("畫完或調整完，記得按上面「🔄 同步目前框選狀態」，面積才會更新。")
-
-    # ── 已封閉空間清單 ──────────────────────────
-    if st.session_state["finished_shapes"]:
-        st.markdown("**已框選的空間：**")
-        total_m2 = 0.0
-        for i, shape in enumerate(st.session_state["finished_shapes"]):
-            area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
-            total_m2 += area_m2
-            c1, c2 = st.columns([0.6, 5.4])
-            with c1:
-                st.markdown(
-                    f"<div style='width:20px;height:20px;border-radius:4px;background:{shape['color']};margin-top:6px'></div>",
-                    unsafe_allow_html=True,
-                )
-            with c2:
-                st.write(f"#{i+1}　約 {area_m2:.2f} m²（{len(shape['points'])} 個角點）")
-
-        st.markdown(f"### 總計：{total_m2:.2f} m²（約 {total_m2/PING_PER_M2:.2f} 坪）")
-
-        results = [
-            {"id": i + 1, "area_m2": polygon_area_px2(s["points"]) * m2_per_px2_display, "points": s["points"]}
-            for i, s in enumerate(st.session_state["finished_shapes"])
-        ]
-
-        st.markdown("**🤖 Claude 輔助核對**：對照原圖，幫忙標註每個框對應的空間、指出可疑或漏框的地方（僅供參考，不影響面積數字）")
-        if st.button("🤖 請 Claude 協助核對", use_container_width=True):
-            overlay = np.array(disp_img).copy()
+    with right_col:
+        st.markdown("#### 面積結果")
+        if st.session_state["finished_shapes"]:
+            total_m2 = 0.0
             for i, shape in enumerate(st.session_state["finished_shapes"]):
-                pts_np = np.array(shape["points"], dtype=np.int32)
-                b = int(shape["color"][1:3], 16); g = int(shape["color"][3:5], 16); r = int(shape["color"][5:7], 16)
-                cv2.polylines(overlay, [pts_np], True, (r, g, b), 3)
-                cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
-                cv2.putText(overlay, f"#{i+1}", (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 0, 0), 2)
-            with st.spinner("Claude 正在對照圖面檢查中…"):
-                review_text = ask_claude_review(overlay, results)
-            st.session_state["claude_review"] = review_text
+                area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
+                total_m2 += area_m2
+                c1, c2 = st.columns([0.5, 5.5])
+                with c1:
+                    st.markdown(
+                        f"<div style='width:18px;height:18px;border-radius:4px;background:{shape['color']};margin-top:6px'></div>",
+                        unsafe_allow_html=True,
+                    )
+                with c2:
+                    st.write(f"#{i+1}　{area_m2:.2f} m²")
 
-        if st.session_state.get("claude_review"):
-            st.info(st.session_state["claude_review"])
+            st.markdown(f"**總計：{total_m2:.2f} m²**")
+            st.caption(f"約 {total_m2/PING_PER_M2:.2f} 坪")
+
+            st.divider()
+            results = [
+                {"id": i + 1, "area_m2": polygon_area_px2(s["points"]) * m2_per_px2_display, "points": s["points"]}
+                for i, s in enumerate(st.session_state["finished_shapes"])
+            ]
+            st.markdown("**🤖 Claude 輔助核對**")
+            st.caption("對照原圖標註每個框對應的空間、指出可疑或漏框的地方（僅供參考，不影響面積數字）")
+            if st.button("請 Claude 協助核對", use_container_width=True):
+                overlay = np.array(disp_img).copy()
+                for i, shape in enumerate(st.session_state["finished_shapes"]):
+                    pts_np = np.array(shape["points"], dtype=np.int32)
+                    b = int(shape["color"][1:3], 16); g = int(shape["color"][3:5], 16); r = int(shape["color"][5:7], 16)
+                    cv2.polylines(overlay, [pts_np], True, (r, g, b), 3)
+                    cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
+                    cv2.putText(overlay, f"#{i+1}", (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 0, 0), 2)
+                with st.spinner("Claude 正在對照圖面檢查中…"):
+                    review_text = ask_claude_review(overlay, results)
+                st.session_state["claude_review"] = review_text
+
+            if st.session_state.get("claude_review"):
+                st.info(st.session_state["claude_review"])
+        else:
+            st.caption("尚未框選任何空間，請在左邊圖面上開始框選。")
 else:
     st.info("請先上傳一份平面圖（PDF 或圖片）開始。")
