@@ -12,7 +12,7 @@ import anthropic
 st.set_page_config(page_title="平面圖面積計算工具", page_icon="📐", layout="wide")
 
 st.title("📐 平面圖面積計算工具")
-st.caption("上傳平面圖 → 矩形拖曳 或 多邊形點角點 → 封閉空間 → 計算實際面積")
+st.caption("上傳平面圖 → 矩形點兩角 或 多邊形點角點 → 即時算出面積")
 
 # ─────────────────────────────────────────────
 # 常數
@@ -21,6 +21,7 @@ RENDER_DPI = 144          # PDF 轉圖片時的渲染解析度（fitz Matrix(2,2
 MAX_CANVAS_WIDTH = 1000   # 顯示圖片最大寬度
 PING_PER_M2 = 3.3058      # 1 坪 = 3.3058 m²
 DEFAULT_COLOR = "#FF6347"
+CROP_PADDING = 25         # 自動裁切建築物範圍時，四周多留的邊界（原圖像素）
 
 # ─────────────────────────────────────────────
 # Session State 初始化
@@ -28,12 +29,9 @@ DEFAULT_COLOR = "#FF6347"
 def init_session():
     defaults = {
         "last_file_key": None,
-        "current_points": [],       # 多邊形模式：目前正在點選、尚未封閉的角點
+        "current_points": [],       # 目前正在點選、尚未封閉的角點（矩形模式最多2個，多邊形不限）
         "finished_shapes": [],      # 已封閉的空間清單，每筆 {"points":[(x,y),...], "color":(b,g,r)}
         "last_click_xy": None,
-        "last_drag_xy": None,
-        "final_results": None,
-        "final_overlay": None,
         "claude_review": None,
     }
     for k, v in defaults.items():
@@ -46,19 +44,12 @@ def reset_drawing_state():
     st.session_state["current_points"] = []
     st.session_state["finished_shapes"] = []
     st.session_state["last_click_xy"] = None
-    st.session_state["last_drag_xy"] = None
-    st.session_state["final_results"] = None
-    st.session_state["final_overlay"] = None
     st.session_state["claude_review"] = None
 
 def hex_to_bgr(hex_color: str):
     hex_color = hex_color.lstrip("#")
     r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
     return (b, g, r)
-
-def hex_to_rgb(hex_color: str):
-    hex_color = hex_color.lstrip("#")
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
 # ─────────────────────────────────────────────
 # PDF / 圖片 → 可顯示圖片，並嘗試自動偵測比例尺
@@ -91,6 +82,20 @@ def load_image_cached(file_bytes: bytes):
     return Image.open(io.BytesIO(file_bytes)).convert("RGB")
 
 @st.cache_data(show_spinner=False)
+def crop_to_content_cached(_img: Image.Image, file_key: str):
+    """自動裁切掉圖面四周的大片空白（例如標題欄、圖框邊界），
+    讓建築物本體置中、盡量填滿畫面，方便框選操作。"""
+    gray = cv2.cvtColor(np.array(_img), cv2.COLOR_RGB2GRAY)
+    _, ink = cv2.threshold(gray, 245, 255, cv2.THRESH_BINARY_INV)
+    ys, xs = np.where(ink > 0)
+    if len(xs) == 0:
+        return _img, (0, 0)
+    x0, x1 = max(0, xs.min() - CROP_PADDING), min(_img.width, xs.max() + CROP_PADDING)
+    y0, y1 = max(0, ys.min() - CROP_PADDING), min(_img.height, ys.max() + CROP_PADDING)
+    cropped = _img.crop((x0, y0, x1, y1))
+    return cropped, (x0, y0)
+
+@st.cache_data(show_spinner=False)
 def resize_display_cached(_img: Image.Image, file_key: str, max_width: int):
     """快取縮圖結果，同一份檔案不用每次點擊都重新resize。"""
     scale = min(1.0, max_width / _img.width)
@@ -107,8 +112,9 @@ def polygon_area_px2(pts):
         area += x1 * y2 - x2 * y1
     return abs(area) / 2
 
-def draw_working_image(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndarray:
-    """把已封閉的空間 + 正在畫的當前空間，疊到底圖上，讓使用者看到目前的進度"""
+def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr, m2_per_px2: float) -> np.ndarray:
+    """畫出目前所有狀態：已封閉空間(含面積標示) + 正在畫的當前點，單一張圖同時做為
+    互動用的畫布跟最終結果圖，不會有「兩張長得一樣的圖」重複出現的狀況。"""
     arr = base_arr.copy()
 
     for i, shape in enumerate(st.session_state["finished_shapes"]):
@@ -116,17 +122,28 @@ def draw_working_image(base_arr: np.ndarray, draw_mode: str, current_color_bgr) 
         pts_np = np.array(shape["points"], dtype=np.int32)
         cv2.polylines(arr, [pts_np], True, color, 3)
         cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
-        cv2.circle(arr, (cx, cy), 14, color, -1)
-        cv2.putText(arr, str(i + 1), (cx - 7, cy + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
-    if draw_mode == "多邊形":
-        cur = st.session_state["current_points"]
-        if cur:
-            for p in cur:
-                cv2.circle(arr, (int(p[0]), int(p[1])), 5, current_color_bgr, -1)
-            if len(cur) > 1:
-                pts_np = np.array(cur, dtype=np.int32)
-                cv2.polylines(arr, [pts_np], False, current_color_bgr, 2)
+        area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2
+        label = f"#{i+1} {area_m2:.1f}m2"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.rectangle(arr, (cx - tw//2 - 5, cy - th - 6), (cx + tw//2 + 5, cy + 6), (255, 255, 255), -1)
+        cv2.rectangle(arr, (cx - tw//2 - 5, cy - th - 6), (cx + tw//2 + 5, cy + 6), color, 2)
+        cv2.putText(arr, label, (cx - tw//2, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    # 正在畫的角點（不管矩形或多邊形，第一下點擊就要立刻看到標記）
+    cur = st.session_state["current_points"]
+    if cur:
+        for p in cur:
+            cv2.circle(arr, (int(p[0]), int(p[1])), 6, current_color_bgr, -1)
+            cv2.circle(arr, (int(p[0]), int(p[1])), 6, (255, 255, 255), 2)
+        if draw_mode == "多邊形" and len(cur) > 1:
+            pts_np = np.array(cur, dtype=np.int32)
+            cv2.polylines(arr, [pts_np], False, current_color_bgr, 2)
+        elif draw_mode == "矩形" and len(cur) == 1:
+            # 只點了第一角時，先畫出十字參考線，讓使用者知道目前點到哪
+            x, y = int(cur[0][0]), int(cur[0][1])
+            cv2.line(arr, (x, 0), (x, arr.shape[0]), current_color_bgr, 1)
+            cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
 
     return arr
 
@@ -189,6 +206,9 @@ if uploaded:
         reset_drawing_state()
         st.session_state["last_file_key"] = file_key
 
+    # ── 自動裁切掉四周空白，讓建築物置中、盡量放大 ──────────────────────
+    img_cropped, _crop_offset = crop_to_content_cached(img, file_key)
+
     # ── 比例尺：自動偵測 + 手動覆蓋 ──────────────────────────
     col_scale1, col_scale2 = st.columns([1, 2])
     with col_scale1:
@@ -208,8 +228,8 @@ if uploaded:
         st.info("圖片檔沒有內建的解析度資訊，面積換算的準確度會比 PDF 差，建議優先使用 PDF。")
 
     # ── 縮放圖片以適合顯示（快取，不會每次點擊都重新計算）──────────────────────
-    disp_img, display_scale = resize_display_cached(img, file_key, MAX_CANVAS_WIDTH)
-    disp_arr_base = np.array(disp_img)  # 底圖的 numpy 陣列，快取起來重複使用
+    disp_img, display_scale = resize_display_cached(img_cropped, file_key, MAX_CANVAS_WIDTH)
+    disp_arr_base = np.array(disp_img)
 
     # ── 換算係數：顯示像素 → 實際公尺 ──────────────────────────
     m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
@@ -223,13 +243,14 @@ if uploaded:
     tool_col1, tool_col2, tool_col3, tool_col4 = st.columns([1.3, 1, 1, 1])
     with tool_col1:
         draw_mode = st.radio("框選模式", ["矩形", "多邊形"], horizontal=True,
-                              help="矩形：直接拖曳一個對角到另一個對角。多邊形：依序點擊每個角點，適合 L 型、斜牆等不規則空間。")
+                              help="矩形：點第一個角、再點對角，自動完成。多邊形：依序點擊每個角點，適合 L 型、斜牆等不規則空間。")
     with tool_col2:
         shape_color_hex = st.color_picker("邊框顏色", DEFAULT_COLOR)
     with tool_col3:
         if st.button("↩️ 復原上一點", use_container_width=True,
-                      disabled=(draw_mode != "多邊形") or len(st.session_state["current_points"]) == 0):
+                      disabled=len(st.session_state["current_points"]) == 0):
             st.session_state["current_points"].pop()
+            st.rerun()
     with tool_col4:
         if st.button("🗑️ 清空全部重來", use_container_width=True):
             reset_drawing_state()
@@ -248,47 +269,42 @@ if uploaded:
             st.session_state["current_points"] = []
             st.rerun()
     else:
-        st.caption("在圖上直接拖曳一個角到對角，放開滑鼠就會自動記錄成一筆矩形。")
+        st.caption("在圖上點第一個角（會立刻出現標記＋參考線），再點對角，就會自動完成一筆矩形。")
 
     st.caption(f"已封閉空間：{len(st.session_state['finished_shapes'])} 個")
 
-    # ── 顯示圖片並擷取座標（矩形用拖曳、多邊形用點擊）──────────────────────
-    working_arr = draw_working_image(disp_arr_base, draw_mode, current_color_bgr)
+    # ── 顯示圖片並擷取點擊座標（單一張圖，即時反映所有狀態）──────────────────
+    working_arr = draw_all(disp_arr_base, draw_mode, current_color_bgr, m2_per_px2_display)
+    click = streamlit_image_coordinates(
+        working_arr, key=f"clicker_{draw_mode}_{file_key}",
+        click_and_drag=False, image_format="JPEG",
+    )
 
-    if draw_mode == "矩形":
-        result = streamlit_image_coordinates(
-            working_arr, key=f"clicker_rect_{file_key}",
-            click_and_drag=True, image_format="JPEG",
-        )
-        if result is not None and "x1" in result:
-            drag_sig = (result["x1"], result["y1"], result["x2"], result["y2"])
-            if drag_sig != st.session_state["last_drag_xy"]:
-                st.session_state["last_drag_xy"] = drag_sig
-                x1, y1, x2, y2 = result["x1"], result["y1"], result["x2"], result["y2"]
+    if click is not None and "x" in click:
+        xy = (click["x"], click["y"])
+        if xy != st.session_state["last_click_xy"]:
+            st.session_state["last_click_xy"] = xy
+            st.session_state["current_points"].append(xy)
+
+            if draw_mode == "矩形" and len(st.session_state["current_points"]) == 2:
+                (x1, y1), (x2, y2) = st.session_state["current_points"]
                 if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
                     rect_pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
                     st.session_state["finished_shapes"].append({
                         "points": rect_pts,
                         "color": current_color_bgr,
                     })
-                    st.rerun()
-    else:
-        click = streamlit_image_coordinates(
-            working_arr, key=f"clicker_poly_{file_key}",
-            click_and_drag=False, image_format="JPEG",
-        )
-        if click is not None and "x" in click:
-            xy = (click["x"], click["y"])
-            if xy != st.session_state["last_click_xy"]:
-                st.session_state["last_click_xy"] = xy
-                st.session_state["current_points"].append(xy)
-                st.rerun()
+                st.session_state["current_points"] = []
 
-    # ── 已封閉空間清單（可個別刪除、改顏色）──────────────────────────
+            st.rerun()
+
+    # ── 已封閉空間清單（可個別刪除）＋ 總計 ──────────────────────────
     if st.session_state["finished_shapes"]:
         st.markdown("**已封閉的空間：**")
+        total_m2 = 0.0
         for i, shape in enumerate(st.session_state["finished_shapes"]):
             area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
+            total_m2 += area_m2
             b, g, r = shape["color"]
             c1, c2, c3 = st.columns([0.6, 4.4, 1])
             with c1:
@@ -303,59 +319,30 @@ if uploaded:
                     st.session_state["finished_shapes"].pop(i)
                     st.rerun()
 
-    # ── 計算面積（正式輸出結果圖）──────────────────────────
-    if st.button("📐 產出面積標示結果", type="primary", use_container_width=True,
-                  disabled=len(st.session_state["finished_shapes"]) == 0):
-        results = []
-        overlay = disp_arr_base.copy()
-        for i, shape in enumerate(st.session_state["finished_shapes"]):
-            poly = shape["points"]
-            color = shape["color"]
-            area_m2 = polygon_area_px2(poly) * m2_per_px2_display
-            results.append({"id": i + 1, "area_m2": area_m2, "points": poly})
-
-            pts_np = np.array(poly, dtype=np.int32)
-            cv2.polylines(overlay, [pts_np], True, color, 3)
-            cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
-            label = f"#{i+1} {area_m2:.1f}m2"
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
-            cv2.rectangle(overlay, (cx - tw//2 - 4, cy - th - 6), (cx + tw//2 + 4, cy + 4), (255, 255, 255), -1)
-            cv2.putText(overlay, label, (cx - tw//2, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 0, 0), 2)
-
-        st.session_state["final_results"] = results
-        st.session_state["final_overlay"] = overlay
-
-    # ── 顯示結果 ──────────────────────────
-    if st.session_state["final_results"]:
-        st.divider()
-        st.subheader("計算結果")
-
-        results = st.session_state["final_results"]
-        total_m2 = sum(r["area_m2"] for r in results)
-
-        for r in results:
-            st.write(f"空間 #{r['id']}：**{r['area_m2']:.2f} m²**（約 {r['area_m2']/PING_PER_M2:.2f} 坪）")
-
         st.markdown(f"### 總計：{total_m2:.2f} m²（約 {total_m2/PING_PER_M2:.2f} 坪）")
 
-        st.image(st.session_state["final_overlay"], caption="面積標示結果", use_container_width=True)
+        # 下載用的圖與 Claude 核對用的資料，直接從目前畫面狀態產生，不用另外再顯示一次圖
+        results = [
+            {"id": i + 1, "area_m2": polygon_area_px2(s["points"]) * m2_per_px2_display, "points": s["points"]}
+            for i, s in enumerate(st.session_state["finished_shapes"])
+        ]
 
-        buf = io.BytesIO()
-        Image.fromarray(st.session_state["final_overlay"]).save(buf, format="PNG")
-        st.download_button(
-            "⬇ 下載標示圖（供報告使用）",
-            data=buf.getvalue(),
-            file_name=f"{uploaded.name.rsplit('.',1)[0]}_面積標示圖.png",
-            mime="image/png",
-            use_container_width=True,
-        )
-
-        st.divider()
-        st.markdown("**🤖 Claude 輔助核對**：對照原圖，幫忙標註每個框對應的空間、指出可疑或漏框的地方（僅供參考，不影響上面已算出的面積數字）")
-        if st.button("🤖 請 Claude 協助核對", use_container_width=True):
-            with st.spinner("Claude 正在對照圖面檢查中…"):
-                review_text = ask_claude_review(st.session_state["final_overlay"], results)
-            st.session_state["claude_review"] = review_text
+        dl_col, claude_col = st.columns(2)
+        with dl_col:
+            buf = io.BytesIO()
+            Image.fromarray(working_arr).save(buf, format="PNG")
+            st.download_button(
+                "⬇ 下載標示圖（供報告使用）",
+                data=buf.getvalue(),
+                file_name=f"{uploaded.name.rsplit('.',1)[0]}_面積標示圖.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+        with claude_col:
+            if st.button("🤖 請 Claude 協助核對", use_container_width=True):
+                with st.spinner("Claude 正在對照圖面檢查中…"):
+                    review_text = ask_claude_review(working_arr, results)
+                st.session_state["claude_review"] = review_text
 
         if st.session_state.get("claude_review"):
             st.info(st.session_state["claude_review"])
