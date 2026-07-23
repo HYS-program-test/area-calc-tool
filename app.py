@@ -3,8 +3,7 @@ import numpy as np
 import cv2
 from PIL import Image
 import fitz  # PyMuPDF
-import streamlit_drawable_canvas as _sdc_module
-from streamlit_drawable_canvas import CanvasResult
+from streamlit_image_coordinates import streamlit_image_coordinates
 import re
 import io
 import base64
@@ -13,16 +12,24 @@ import anthropic
 st.set_page_config(page_title="平面圖面積計算工具", page_icon="📐", layout="wide")
 
 RENDER_DPI = 144
-MAX_CANVAS_WIDTH = 1100
+MAX_CANVAS_WIDTH = 1150
 PING_PER_M2 = 3.3058
 CROP_PADDING = 25
 FIXED_COLORS = ["#FF6347", "#3B82F6", "#22C55E", "#F59E0B", "#A855F7", "#06B6D4"]
+COLOR_LABELS = ["🔴", "🔵", "🟢", "🟠", "🟣", "🔷"]
 
 # ─────────────────────────────────────────────
 # Session State
 # ─────────────────────────────────────────────
 def init_session():
-    defaults = {"last_file_key": None, "canvas_json": None, "claude_review": None, "color_idx": 0}
+    defaults = {
+        "last_file_key": None,
+        "current_points": [],
+        "finished_shapes": [],   # [{"points":[(x,y),...], "color":(b,g,r)}]
+        "last_click_xy": None,
+        "claude_review": None,
+        "color_idx": 0,
+    }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -30,46 +37,18 @@ def init_session():
 init_session()
 
 def reset_drawing_state():
-    st.session_state["canvas_json"] = None
+    st.session_state["current_points"] = []
+    st.session_state["finished_shapes"] = []
+    st.session_state["last_click_xy"] = None
     st.session_state["claude_review"] = None
 
-# ─────────────────────────────────────────────
-# 安全版 st_canvas：自己組 base64 網址傳背景圖，繞過套件內部
-# image_to_url() 在部分情況下失效、導致背景圖顯示不出來的問題
-# （這是先前實測過確實有效的修正）
-# ─────────────────────────────────────────────
-def st_canvas_safe(fill_color, stroke_width, stroke_color, background_image,
-                    height, width, drawing_mode, initial_drawing, key):
-    buf = io.BytesIO()
-    background_image.convert("RGB").save(buf, format="JPEG", quality=85, optimize=True)
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    background_image_url = f"data:image/jpeg;base64,{b64}"
-
-    initial_drawing = {"version": "4.4.0"} if initial_drawing is None else dict(initial_drawing)
-    initial_drawing["background"] = ""
-
-    try:
-        component_value = _sdc_module._component_func(
-            fillColor=fill_color, strokeWidth=stroke_width, strokeColor=stroke_color,
-            backgroundColor="", backgroundImageURL=background_image_url,
-            realtimeUpdateStreamlit=True,
-            canvasHeight=height, canvasWidth=width,
-            drawingMode=drawing_mode, initialDrawing=initial_drawing,
-            displayToolbar=True, displayRadius=3, key=key, default=None,
-        )
-    except Exception as e:
-        st.error(f"畫布元件載入失敗：{e}")
-        return CanvasResult()
-
-    if component_value is None:
-        return CanvasResult()
-    return CanvasResult(
-        np.asarray(_sdc_module._data_url_to_image(component_value["data"])),
-        component_value["raw"],
-    )
+def hex_to_bgr(hex_color: str):
+    hex_color = hex_color.lstrip("#")
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    return (b, g, r)
 
 # ─────────────────────────────────────────────
-# 圖片載入 / 裁切 / 縮放（快取）
+# 圖片載入 / 裁切 / 縮放（快取，避免每次互動都重新運算造成卡頓）
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_pdf_cached(pdf_bytes: bytes):
@@ -96,6 +75,8 @@ def load_image_cached(file_bytes: bytes):
 
 @st.cache_data(show_spinner=False)
 def crop_to_content_cached(_img: Image.Image, file_key: str):
+    """自動裁切掉圖面四周空白／外框，用「墨跡密度」找出真正的建築本體
+    （排除滿版圖框線這種 bbox 很大但密度很低的東西），置中放大顯示。"""
     gray = cv2.cvtColor(np.array(_img), cv2.COLOR_RGB2GRAY)
     _, ink = cv2.threshold(gray, 245, 255, cv2.THRESH_BINARY_INV)
     ink_d = cv2.dilate(ink, np.ones((5, 5), np.uint8), iterations=2)
@@ -133,30 +114,32 @@ def polygon_area_px2(pts):
         area += x1 * y2 - x2 * y1
     return abs(area) / 2
 
-def extract_shapes(json_data):
-    """從畫布的 json_data 解析出每個物件的實際頂點座標（矩形／多邊形皆轉成頂點清單）"""
-    if not json_data:
-        return []
-    shapes = []
-    for obj in json_data.get("objects", []):
-        color = obj.get("stroke", "#FF6347")
-        left, top = obj.get("left", 0), obj.get("top", 0)
-        scale_x, scale_y = obj.get("scaleX", 1), obj.get("scaleY", 1)
-        angle = obj.get("angle", 0)
-        if obj.get("type") == "rect":
-            w, h = obj.get("width", 0) * scale_x, obj.get("height", 0) * scale_y
-            pts = [(0, 0), (w, 0), (w, h), (0, h)]
-        elif obj.get("type") == "polygon":
-            pts = [(p["x"] * scale_x, p["y"] * scale_y) for p in obj.get("points", [])]
-        else:
-            continue
-        # 套用旋轉角度（若有被轉過）
-        theta = np.radians(angle)
-        cos_t, sin_t = np.cos(theta), np.sin(theta)
-        abs_pts = [(left + x*cos_t - y*sin_t, top + x*sin_t + y*cos_t) for x, y in pts]
-        if len(abs_pts) >= 3:
-            shapes.append({"points": abs_pts, "color": color})
-    return shapes
+def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndarray:
+    arr = base_arr.copy()
+    for i, shape in enumerate(st.session_state["finished_shapes"]):
+        color = shape["color"]
+        pts_np = np.array(shape["points"], dtype=np.int32)
+        cv2.polylines(arr, [pts_np], True, color, 3)
+        cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
+        label = f"#{i+1}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.rectangle(arr, (cx - tw//2 - 5, cy - th - 6), (cx + tw//2 + 5, cy + 6), (255, 255, 255), -1)
+        cv2.rectangle(arr, (cx - tw//2 - 5, cy - th - 6), (cx + tw//2 + 5, cy + 6), color, 2)
+        cv2.putText(arr, label, (cx - tw//2, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    cur = st.session_state["current_points"]
+    if cur:
+        for p in cur:
+            cv2.circle(arr, (int(p[0]), int(p[1])), 6, current_color_bgr, -1)
+            cv2.circle(arr, (int(p[0]), int(p[1])), 6, (255, 255, 255), 2)
+        if draw_mode == "多邊形" and len(cur) > 1:
+            pts_np = np.array(cur, dtype=np.int32)
+            cv2.polylines(arr, [pts_np], False, current_color_bgr, 2)
+        elif draw_mode == "矩形" and len(cur) == 1:
+            x, y = int(cur[0][0]), int(cur[0][1])
+            cv2.line(arr, (x, 0), (x, arr.shape[0]), current_color_bgr, 1)
+            cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
+    return arr
 
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
@@ -188,7 +171,7 @@ def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
         return f"⚠️ 呼叫 Claude 發生錯誤：{e}"
 
 # ─────────────────────────────────────────────
-# 主流程
+# 版面：精簡標題列
 # ─────────────────────────────────────────────
 title_col, upload_col = st.columns([1.2, 2.5])
 with title_col:
@@ -213,24 +196,37 @@ if uploaded:
 
     img_cropped = crop_to_content_cached(img, file_key)
     disp_img, display_scale = resize_display_cached(img_cropped, file_key, MAX_CANVAS_WIDTH)
+    disp_arr_base = np.array(disp_img)
 
-    t1, t2, t3, t4 = st.columns([1.3, 1.4, 1.6, 1.6])
+    # ── 緊湊工具列 ──────────────────────────
+    t1, t2, t3, t4, t5, t6 = st.columns([1.2, 1.6, 2, 1, 1, 1])
     with t1:
         scale_ratio = st.number_input(
             f"比例尺 1:N｜{'✅自動' if auto_scale else '⚠️手動'}",
             min_value=1, value=auto_scale or 100, step=10,
         )
     with t2:
-        draw_mode = st.radio("模式", ["矩形", "多邊形", "選取／調整"], horizontal=True)
-    with t3:
-        color_labels = ["🔴", "🔵", "🟢", "🟠", "🟣", "🔷"]
-        picked = st.radio("顏色", color_labels, horizontal=True,
-                           index=st.session_state["color_idx"])
-        st.session_state["color_idx"] = color_labels.index(picked)
+        picked = st.radio("顏色", COLOR_LABELS, horizontal=True, index=st.session_state["color_idx"])
+        st.session_state["color_idx"] = COLOR_LABELS.index(picked)
         shape_color_hex = FIXED_COLORS[st.session_state["color_idx"]]
+    with t3:
+        draw_mode = st.radio("模式", ["矩形", "多邊形"], horizontal=True,
+                              help="矩形：點第一角、再點對角自動完成。多邊形：依序點角點，點回起點附近自動封閉。")
     with t4:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button("🗑️ 清空全部重來", use_container_width=True):
+        if st.button("↩️ 復原", use_container_width=True,
+                      disabled=len(st.session_state["current_points"]) == 0):
+            st.session_state["current_points"].pop()
+            st.rerun()
+    with t5:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if st.button("🗑️ 刪末框", use_container_width=True,
+                      disabled=len(st.session_state["finished_shapes"]) == 0):
+            st.session_state["finished_shapes"].pop()
+            st.rerun()
+    with t6:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if st.button("🗑️ 清空", use_container_width=True):
             reset_drawing_state()
             st.rerun()
 
@@ -243,69 +239,77 @@ if uploaded:
     else:
         m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
     m2_per_px2_display = m_per_px_display ** 2
+    current_color_bgr = hex_to_bgr(shape_color_hex)
 
-    mode_map = {"矩形": "rect", "多邊形": "polygon", "選取／調整": "transform"}
-
-    canvas_result = st_canvas_safe(
-        fill_color=shape_color_hex + "40",
-        stroke_width=3,
-        stroke_color=shape_color_hex,
-        background_image=disp_img,
-        height=disp_img.height,
-        width=disp_img.width,
-        drawing_mode=mode_map[draw_mode],
-        initial_drawing=st.session_state["canvas_json"],
-        key=f"canvas_{file_key}",
+    # ── 圖面：主要區域，撐滿可用寬度顯示 ──────────────────────
+    working_arr = draw_all(disp_arr_base, draw_mode, current_color_bgr)
+    click = streamlit_image_coordinates(
+        working_arr, key=f"clicker_{draw_mode}_{file_key}",
+        click_and_drag=False, image_format="JPEG",
+        use_column_width="always",
     )
 
-    # 官方標準雙向同步：畫布每次變動，realtimeUpdateStreamlit=True 就會自動把最新
-    # json_data 傳回來，這裡存進 session_state，下次重繪（例如切換模式）時當作
-    # initial_drawing 餵回去，藏框不會因為切模式而消失
-    if canvas_result.json_data is not None:
-        st.session_state["canvas_json"] = canvas_result.json_data
+    if click is not None and "x" in click:
+        disp_w = click.get("width") or disp_img.width
+        disp_h = click.get("height") or disp_img.height
+        scale_x = disp_img.width / disp_w if disp_w else 1
+        scale_y = disp_img.height / disp_h if disp_h else 1
+        real_x = click["x"] * scale_x
+        real_y = click["y"] * scale_y
 
-    shapes = extract_shapes(st.session_state["canvas_json"])
+        xy = (real_x, real_y)
+        if xy != st.session_state["last_click_xy"]:
+            st.session_state["last_click_xy"] = xy
+            st.session_state["current_points"].append(xy)
 
-    # ── 結果 ──────────────────────────
-    if shapes:
-        total_m2 = sum(polygon_area_px2(s["points"]) * m2_per_px2_display for s in shapes)
-        res_cols = st.columns(min(len(shapes), 8) + 1)
-        for i, shape in enumerate(shapes[:8]):
+            if draw_mode == "矩形" and len(st.session_state["current_points"]) == 2:
+                (x1, y1), (x2, y2) = st.session_state["current_points"]
+                if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
+                    rect_pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+                    st.session_state["finished_shapes"].append({"points": rect_pts, "color": current_color_bgr})
+                st.session_state["current_points"] = []
+            elif draw_mode == "多邊形" and len(st.session_state["current_points"]) > 2:
+                x0, y0 = st.session_state["current_points"][0]
+                if ((xy[0]-x0)**2 + (xy[1]-y0)**2) ** 0.5 < 14:
+                    poly_pts = st.session_state["current_points"][:-1]
+                    st.session_state["finished_shapes"].append({"points": poly_pts, "color": current_color_bgr})
+                    st.session_state["current_points"] = []
+
+            st.rerun()
+
+    # ── 結果列：緊湊橫向卡片 ──────────────────────────
+    if st.session_state["finished_shapes"]:
+        total_m2 = sum(polygon_area_px2(s["points"]) * m2_per_px2_display for s in st.session_state["finished_shapes"])
+        res_cols = st.columns(min(len(st.session_state["finished_shapes"]), 8) + 1)
+        for i, shape in enumerate(st.session_state["finished_shapes"][:8]):
             area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
-            color = shape["color"]
+            b, g, r = shape["color"]
             with res_cols[i]:
                 st.markdown(
-                    f"<div style='text-align:center;padding:4px;border-radius:6px;background:{color}22;border:1px solid {color}'>"
-                    f"<b style='color:{color}'>#{i+1}</b><br>{area_m2:.2f} m²</div>",
+                    f"<div style='text-align:center;padding:4px;border-radius:6px;background:rgba({r},{g},{b},0.12);border:1px solid rgb({r},{g},{b})'>"
+                    f"<b style='color:rgb({r},{g},{b})'>#{i+1}</b><br>{area_m2:.2f} m²</div>",
                     unsafe_allow_html=True,
                 )
         with res_cols[-1]:
             st.markdown(
                 f"<div style='text-align:center;padding:4px;border-radius:6px;background:#f0f4ff;border:1px solid #1a3f6f'>"
-                f"<b>總計</b><br>{total_m2:.2f} m²</div>", unsafe_allow_html=True,
+                f"<b>總計</b><br>{total_m2:.2f} m²</div>",
+                unsafe_allow_html=True,
             )
-        st.caption(f"約 {total_m2/PING_PER_M2:.2f} 坪")
+        st.caption(f"約 {total_m2/PING_PER_M2:.2f} 坪" + ("　（僅顯示前 8 筆卡片，清單已全數計入總計）" if len(st.session_state["finished_shapes"]) > 8 else ""))
 
         with st.expander("🤖 Claude 輔助核對（對照原圖標註每個框對應的空間，僅供參考）"):
             results = [
                 {"id": i + 1, "area_m2": polygon_area_px2(s["points"]) * m2_per_px2_display, "points": s["points"]}
-                for i, s in enumerate(shapes)
+                for i, s in enumerate(st.session_state["finished_shapes"])
             ]
             if st.button("請 Claude 協助核對"):
-                overlay = np.array(disp_img).copy()
-                for i, shape in enumerate(shapes):
-                    pts_np = np.array(shape["points"], dtype=np.int32)
-                    hexc = shape["color"].lstrip("#")
-                    r, g, b = int(hexc[0:2], 16), int(hexc[2:4], 16), int(hexc[4:6], 16)
-                    cv2.polylines(overlay, [pts_np], True, (r, g, b), 3)
-                    cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
-                    cv2.putText(overlay, f"#{i+1}", (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 0, 0), 2)
                 with st.spinner("Claude 正在對照圖面檢查中…"):
-                    review_text = ask_claude_review(overlay, results)
+                    review_text = ask_claude_review(working_arr, results)
                 st.session_state["claude_review"] = review_text
             if st.session_state.get("claude_review"):
                 st.info(st.session_state["claude_review"])
     else:
-        st.caption("尚未框選任何空間，請在上方圖面開始框選。")
+        st.caption("尚未框選任何空間，請直接在上方圖面點擊開始框選。")
 else:
     st.info("請先上傳一份平面圖（PDF 或圖片）開始。")
