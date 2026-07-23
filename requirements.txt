@@ -1,5 +1,5 @@
 streamlit>=1.35.0
-streamlit-javascript>=0.1.5
+streamlit-drawable-canvas-fix>=0.9.8
 PyMuPDF>=1.24.0
 opencv-python-headless>=4.9.0
 numpy>=1.26.0
