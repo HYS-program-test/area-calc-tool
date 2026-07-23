@@ -199,12 +199,13 @@ def ask_claude_detect_rooms(disp_img: Image.Image, send_width: int = 1150):
     send_width 控制實際送給 Claude 的圖片寬度，用來測試不同尺寸對辨識精準度的影響。"""
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY"
+        return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY", None
 
     send_img = disp_img
     if send_width and send_width < disp_img.width:
         ratio = send_width / disp_img.width
         send_img = disp_img.resize((send_width, int(disp_img.height * ratio)))
+    actual_send_size = send_img.size
 
     buf = io.BytesIO()
     send_img.save(buf, format="PNG")
@@ -235,9 +236,9 @@ def ask_claude_detect_rooms(disp_img: Image.Image, send_width: int = 1150):
         raw_text = response.content[0].text.strip()
         raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
         rooms = json.loads(raw_text)
-        return rooms, None
+        return rooms, None, actual_send_size
     except Exception as e:
-        return None, f"⚠️ 呼叫 Claude 發生錯誤：{e}"
+        return None, f"⚠️ 呼叫 Claude 發生錯誤：{e}", actual_send_size
 
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
@@ -350,7 +351,10 @@ if uploaded:
 
         if ai_detect_clicked:
             with st.spinner(f"Claude 正在判讀平面圖（送圖寬度 {send_width}px），框出房間邊界中…"):
-                rooms, err = ask_claude_detect_rooms(disp_img, send_width)
+                rooms, err, actual_size = ask_claude_detect_rooms(disp_img, send_width)
+            if actual_size:
+                st.caption(f"✅ 這次實際送給 Claude 的圖片尺寸：{actual_size[0]} × {actual_size[1]} px"
+                           f"（畫面上顯示的圖不會跟著變小，只有送給 Claude 的那份副本會縮）")
             if err:
                 st.error(err)
             elif not rooms:
