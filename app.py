@@ -14,7 +14,6 @@ import anthropic
 st.set_page_config(page_title="平面圖面積計算工具", page_icon="📐", layout="wide")
 
 RENDER_DPI = 144
-MAX_CANVAS_WIDTH = 1150
 PING_PER_M2 = 3.3058
 CROP_PADDING = 25
 FIXED_COLORS = ["#FF6347", "#3B82F6", "#22C55E", "#F59E0B", "#A855F7", "#06B6D4"]
@@ -191,24 +190,18 @@ def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndar
             cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
     return arr
 
-def ask_claude_detect_rooms(disp_img: Image.Image, send_width: int = 1150):
+def ask_claude_detect_rooms(disp_img: Image.Image):
     """請 Claude 直接用視覺理解去判斷平面圖上每個獨立房間的邊界，
     回傳每個房間的頂點座標（用 0~1 的相對比例，不用絕對像素——
     這對視覺模型來說通常估得比絕對像素座標準，我們自己再換算回實際像素）。
     這是「語意判斷」出的草稿，精確度不會是像素級的，仍需要人工用框選工具核對調整。
-    send_width 控制實際送給 Claude 的圖片寬度，用來測試不同尺寸對辨識精準度的影響。"""
+    送進來的 disp_img 就是使用者在上方選定尺寸後的那一份工作圖，跟畫面顯示、框選用的是同一份。"""
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY", None
-
-    send_img = disp_img
-    if send_width and send_width < disp_img.width:
-        ratio = send_width / disp_img.width
-        send_img = disp_img.resize((send_width, int(disp_img.height * ratio)))
-    actual_send_size = send_img.size
+        return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY"
 
     buf = io.BytesIO()
-    send_img.save(buf, format="PNG")
+    disp_img.save(buf, format="PNG")
     b64_img = base64.b64encode(buf.getvalue()).decode()
 
     prompt = """這是一張建築平面圖。請你判斷圖中每一個獨立的房間／空間（忽略樓梯間、電梯核心、
@@ -236,9 +229,9 @@ def ask_claude_detect_rooms(disp_img: Image.Image, send_width: int = 1150):
         raw_text = response.content[0].text.strip()
         raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
         rooms = json.loads(raw_text)
-        return rooms, None, actual_send_size
+        return rooms, None
     except Exception as e:
-        return None, f"⚠️ 呼叫 Claude 發生錯誤：{e}", actual_send_size
+        return None, f"⚠️ 呼叫 Claude 發生錯誤：{e}"
 
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
@@ -296,7 +289,14 @@ if uploaded:
         st.session_state["last_file_key"] = file_key
 
     img_cropped = crop_to_content_cached(img, file_key)
-    disp_img, display_scale = resize_display_cached(img_cropped, file_key, MAX_CANVAS_WIDTH)
+
+    size_label = st.select_slider(
+        "圖面尺寸（會影響畫面顯示、框選、以及送給 Claude 辨識用的圖，三者都是同一份）",
+        options=["小 (600px)", "中 (900px)", "大 (1150px)"], value="大 (1150px)",
+    )
+    working_width = {"小 (600px)": 600, "中 (900px)": 900, "大 (1150px)": 1150}[size_label]
+
+    disp_img, display_scale = resize_display_cached(img_cropped, f"{file_key}_{working_width}", working_width)
     disp_arr_base = np.array(disp_img)
 
     with st.expander("🖊️ 框選工具", expanded=True):
@@ -335,26 +335,17 @@ if uploaded:
         if not is_pdf:
             st.caption("⚠️ 圖片檔沒有內建解析度資訊，面積換算準確度會比 PDF 差。")
 
-        ai_col1, ai_col2, ai_col3 = st.columns([1.3, 1.1, 2.6])
+        ai_col1, ai_col2 = st.columns([1.3, 4])
         with ai_col1:
             ai_detect_clicked = st.button("🤖 Claude 自動框選（草稿）", use_container_width=True,
                                            help="請 Claude 用視覺判斷直接框出房間邊界，當作草稿，仍建議人工核對調整")
         with ai_col2:
-            send_size_label = st.selectbox("送圖尺寸", ["小 (600px)", "中 (900px)", "原尺寸"], index=2,
-                                            label_visibility="collapsed")
-        with ai_col3:
-            st.caption("Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。"
-                       "「送圖尺寸」可以用來比較不同大小的辨識結果。")
-
-        send_width_map = {"小 (600px)": 600, "中 (900px)": 900, "原尺寸": disp_img.width}
-        send_width = send_width_map[send_size_label]
+            st.caption(f"目前用「{size_label}」這份圖送給 Claude 辨識，跟上方顯示、框選用的是同一份圖。"
+                       "Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。")
 
         if ai_detect_clicked:
-            with st.spinner(f"Claude 正在判讀平面圖（送圖寬度 {send_width}px），框出房間邊界中…"):
-                rooms, err, actual_size = ask_claude_detect_rooms(disp_img, send_width)
-            if actual_size:
-                st.caption(f"✅ 這次實際送給 Claude 的圖片尺寸：{actual_size[0]} × {actual_size[1]} px"
-                           f"（畫面上顯示的圖不會跟著變小，只有送給 Claude 的那份副本會縮）")
+            with st.spinner(f"Claude 正在判讀平面圖（{size_label}），框出房間邊界中…"):
+                rooms, err = ask_claude_detect_rooms(disp_img)
             if err:
                 st.error(err)
             elif not rooms:
