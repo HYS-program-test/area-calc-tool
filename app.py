@@ -332,12 +332,7 @@ if uploaded:
 
     img_cropped = crop_to_content_cached(img, file_key)
 
-    size_label = st.select_slider(
-        "圖面尺寸（會影響畫面顯示、框選、以及送給 Claude 辨識用的圖，三者都是同一份）",
-        options=["小 (600px)", "中 (900px)", "大 (1150px)"], value="大 (1150px)",
-    )
-    working_width = {"小 (600px)": 600, "中 (900px)": 900, "大 (1150px)": 1150}[size_label]
-
+    working_width = 1150
     disp_img, display_scale = resize_display_cached(img_cropped, f"{file_key}_{working_width}", working_width)
     disp_arr_base = np.array(disp_img)
 
@@ -387,11 +382,10 @@ if uploaded:
 
             ai_detect_clicked = st.button("🤖 Claude 自動框選（草稿）", use_container_width=True,
                                            help="請 Claude 用視覺判斷直接框出房間邊界，當作草稿，仍建議人工核對調整")
-            st.caption(f"目前用「{size_label}」這份圖送給 Claude 辨識，跟顯示、框選用的是同一份圖。"
-                       "Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。")
+            st.caption("Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。")
 
             if ai_detect_clicked:
-                with st.spinner(f"Claude 正在判讀平面圖（{size_label}），先分析再框邊界中…"):
+                with st.spinner("Claude 正在判讀平面圖，先分析再框邊界中…"):
                     rooms, err, analysis = ask_claude_detect_rooms(disp_img)
                 if err:
                     st.error(err)
