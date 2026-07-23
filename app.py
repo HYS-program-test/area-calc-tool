@@ -391,36 +391,17 @@ if shapes_for_table:
             "面積(m²)": s["area"],
             "每坪建議負荷值": prev.get("每坪建議負荷值", 800),
             "室內機": prev.get("室內機", ""),
+            "連結率": prev.get("連結率", ""),
         })
     st.session_state["equip_table"] = rows
 
 df_source = st.session_state["equip_table"] or [
-    {"編號": "#1", "空間名稱": "", "面積(m²)": 0.0, "每坪建議負荷值": 800, "室內機": ""}
+    {"編號": "#1", "空間名稱": "", "面積(m²)": 0.0, "每坪建議負荷值": 800, "室內機": "", "連結率": ""}
 ]
 
-# 依「室內機」查找對應的類型／室內機冷房能力／室外機，並計算需求冷房能力
-computed_rows = []
-for row in df_source:
-    area = row.get("面積(m²)", 0) or 0
-    load = row.get("每坪建議負荷值", 800) or 800
-    demand = round(area / 3.3 * load) if area else 0
-    indoor = row.get("室內機", "")
-    info = equip_lookup.get(indoor, {})
-    equip_type = info.get("類型", "")
-    computed_rows.append({
-        "編號": row.get("編號", ""),
-        "空間名稱": row.get("空間名稱", ""),
-        "面積(m²)": area,
-        "每坪建議負荷值": load,
-        "需求冷房能力": demand,
-        "室內機": indoor,
-        "類型": equip_type,
-        "室內機冷房能力": info.get("室內機冷房能力", ""),
-        "室外機": info.get("室外機", ""),
-        "連結率": row.get("連結率", "") if "VRV" in equip_type.upper() else "",
-    })
-
-df = pd.DataFrame(computed_rows)
+# 只放「使用者會手動編輯」的欄位。這份資料只在框選結果真的變動時才會重建，
+# 不會因為每次重新整理都重算衍生欄位而干擾到下拉選單的操作（原本的雙擊 bug 就是這樣來的）
+df = pd.DataFrame(df_source)
 
 edited_df = st.data_editor(
     df,
@@ -431,22 +412,31 @@ edited_df = st.data_editor(
         "空間名稱": st.column_config.TextColumn("空間名稱"),
         "面積(m²)": st.column_config.NumberColumn("面積(m²)", min_value=0.0, step=0.1, format="%.2f"),
         "每坪建議負荷值": st.column_config.SelectboxColumn("每坪建議負荷值", options=LOAD_OPTIONS, required=True),
-        "需求冷房能力": st.column_config.NumberColumn("需求冷房能力", disabled=True,
-                                                     help="= 面積(m²) ÷ 3.3 × 每坪建議負荷值"),
         "室內機": st.column_config.SelectboxColumn("室內機", options=indoor_models or [""]),
-        "類型": st.column_config.TextColumn("類型", disabled=True, help="依選定的室內機自動帶出"),
-        "室內機冷房能力": st.column_config.TextColumn("室內機冷房能力", disabled=True),
-        "室外機": st.column_config.TextColumn("室外機", disabled=True, help="依選定的室內機自動帶出"),
         "連結率": st.column_config.TextColumn("連結率", help="僅 VRV 系列需要填寫"),
     },
     key="equip_data_editor",
 )
+st.session_state["equip_table"] = edited_df.to_dict("records")
 
-# 存回 session_state 時，只保留使用者可編輯的欄位（其餘欄位下次重繪時會重新計算/查找）
-st.session_state["equip_table"] = [
-    {
-        "編號": r["編號"], "空間名稱": r["空間名稱"], "面積(m²)": r["面積(m²)"],
-        "每坪建議負荷值": r["每坪建議負荷值"], "室內機": r["室內機"], "連結率": r["連結率"],
-    }
-    for r in edited_df.to_dict("records")
-]
+# ── 計算結果：唯讀表格，依編輯表格的內容即時算出，不影響上方編輯狀態 ──────────
+st.markdown("**計算結果**")
+computed_rows = []
+for row in edited_df.to_dict("records"):
+    area = row.get("面積(m²)", 0) or 0
+    load = row.get("每坪建議負荷值", 800) or 800
+    demand = round(area / 3.3 * load) if area else 0
+    indoor = row.get("室內機", "")
+    info = equip_lookup.get(indoor, {})
+    equip_type = info.get("類型", "")
+    computed_rows.append({
+        "編號": row.get("編號", ""),
+        "空間名稱": row.get("空間名稱", ""),
+        "需求冷房能力": demand,
+        "類型": equip_type,
+        "室內機": indoor,
+        "室內機冷房能力": info.get("室內機冷房能力", ""),
+        "室外機": info.get("室外機", ""),
+        "連結率": row.get("連結率", "") if "VRV" in equip_type.upper() else "",
+    })
+st.dataframe(pd.DataFrame(computed_rows), use_container_width=True, hide_index=True)
