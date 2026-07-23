@@ -31,6 +31,7 @@ def init_session():
         "finished_shapes": [],   # [{"points":[(x,y),...], "color":(b,g,r)}]
         "last_click_xy": None,
         "claude_review": None,
+        "claude_detect_analysis": None,
         "color_idx": 0,
         "equip_table": None,
     }
@@ -45,6 +46,7 @@ def reset_drawing_state():
     st.session_state["finished_shapes"] = []
     st.session_state["last_click_xy"] = None
     st.session_state["claude_review"] = None
+    st.session_state["claude_detect_analysis"] = None
 
 def hex_to_bgr(hex_color: str):
     hex_color = hex_color.lstrip("#")
@@ -192,10 +194,14 @@ def ask_claude_detect_rooms(disp_img: Image.Image):
     回傳每個房間的頂點座標（用 0~1 的相對比例，不用絕對像素——
     這對視覺模型來說通常估得比絕對像素座標準，我們自己再換算回實際像素）。
     這是「語意判斷」出的草稿，精確度不會是像素級的，仍需要人工用框選工具核對調整。
-    送進來的 disp_img 就是使用者在上方選定尺寸後的那一份工作圖，跟畫面顯示、框選用的是同一份。"""
+    送進來的 disp_img 就是使用者在上方選定尺寸後的那一份工作圖，跟畫面顯示、框選用的是同一份。
+
+    採用「先文字分析、再給座標」的兩段式做法：先請 Claude 用文字描述每個房間的邊界依據
+    （哪一側是外牆、哪一側是隔間牆、哪一側是門），再根據這段分析轉換成座標——
+    目的是強迫它先想清楚再回答，而不是直接憑直覺猜數字，理論上有機會提高精準度。"""
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY"
+        return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY", None
 
     buf = io.BytesIO()
     disp_img.save(buf, format="PNG")
@@ -204,31 +210,46 @@ def ask_claude_detect_rooms(disp_img: Image.Image):
     prompt = """這是一張建築平面圖。請你判斷圖中每一個獨立的房間／空間（忽略樓梯間、電梯核心、
 純走道這類開放式流通空間，只框出有明確機能的獨立房間，例如臥室、衛浴、廚房、客廳、儲藏室等）。
 
-對每個房間，估計它邊界的角點座標。座標請用「相對比例」表示：
-左上角是 (0, 0)，右下角是 (1, 1)，例如某個角點在圖面寬度 30%、高度 45% 的位置，就寫 [0.3, 0.45]。
-矩形房間給 4 個角點，不規則（L型等）房間可以給更多角點，依實際牆角描繪。
+請分兩步驟回答：
 
-只回傳 JSON，不要有其他文字，格式如下：
+【第一步：文字分析】
+針對每一個房間，用文字描述它的四個邊界分別是什麼（例如：「臥室A：左邊到外牆、右邊到與臥室B
+之間的隔間牆、上邊到走道的牆面、下邊到與衛浴共用的牆」），並描述這個房間大概涵蓋圖面寬度／
+高度的百分比範圍（例如：「大約在圖面寬度 5%~40%、高度 5%~42% 的範圍內」）。這一步是為了讓你
+先仔細觀察牆面位置，再進到第二步。
+
+【第二步：座標】
+根據第一步的分析，把每個房間邊界轉換成角點座標。座標請用「相對比例」表示：
+左上角是 (0, 0)，右下角是 (1, 1)。矩形房間給 4 個角點，不規則（L型等）房間可以給更多角點，
+依第一步描述的實際牆角轉換，不要跟第一步的分析矛盾。
+
+第二步的座標結果，請用下面這兩個標記包住，標記中間只能放 JSON，不要有其他文字：
+===JSON_START===
 [
   {"name": "房間名稱（看得出來就填，看不出來就填空字串）", "points": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]},
   ...
-]"""
+]
+===JSON_END==="""
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=2048,
+            model="claude-sonnet-4-6", max_tokens=3072,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64_img}},
                 {"type": "text", "text": prompt},
             ]}],
         )
         raw_text = response.content[0].text.strip()
-        raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
-        rooms = json.loads(raw_text)
-        return rooms, None
+        m = re.search(r"===JSON_START===(.*?)===JSON_END===", raw_text, flags=re.DOTALL)
+        if not m:
+            return None, "⚠️ Claude 回應格式不符預期（找不到 JSON 標記），請重試", raw_text
+        json_text = re.sub(r"^```(json)?|```$", "", m.group(1).strip(), flags=re.MULTILINE).strip()
+        rooms = json.loads(json_text)
+        analysis_text = raw_text.split("===JSON_START===")[0].strip()
+        return rooms, None, analysis_text
     except Exception as e:
-        return None, f"⚠️ 呼叫 Claude 發生錯誤：{e}"
+        return None, f"⚠️ 呼叫 Claude 發生錯誤：{e}", None
 
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
@@ -346,10 +367,13 @@ if uploaded:
                        "Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。")
 
             if ai_detect_clicked:
-                with st.spinner(f"Claude 正在判讀平面圖（{size_label}），框出房間邊界中…"):
-                    rooms, err = ask_claude_detect_rooms(disp_img)
+                with st.spinner(f"Claude 正在判讀平面圖（{size_label}），先分析再框邊界中…"):
+                    rooms, err, analysis = ask_claude_detect_rooms(disp_img)
                 if err:
                     st.error(err)
+                    if analysis:
+                        with st.expander("查看 Claude 原始回應（除錯用）"):
+                            st.text(analysis)
                 elif not rooms:
                     st.warning("Claude 沒有辨識出任何房間，請改用手動框選。")
                 else:
@@ -364,8 +388,14 @@ if uploaded:
                         new_shapes.append({"points": abs_pts, "color": color})
                     st.session_state["finished_shapes"] = new_shapes
                     st.session_state["current_points"] = []
+                    if analysis:
+                        st.session_state["claude_detect_analysis"] = analysis
                     st.success(f"Claude 框出了 {len(new_shapes)} 個房間草稿，請往下核對、用框選工具調整。")
                     st.rerun()
+
+            if st.session_state.get("claude_detect_analysis"):
+                with st.expander("📝 Claude 的文字分析（框選依據，可對照檢查哪裡判斷錯了）"):
+                    st.text(st.session_state["claude_detect_analysis"])
 
             m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
             if m_per_px_at_render:
