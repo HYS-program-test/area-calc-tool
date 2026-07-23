@@ -4,7 +4,6 @@ import cv2
 import pandas as pd
 from PIL import Image
 import fitz  # PyMuPDF
-from streamlit_image_coordinates import streamlit_image_coordinates
 try:
     from streamlit_image_annotation import detection as st_detection
     HAS_ANNOTATION_PKG = True
@@ -31,11 +30,8 @@ DEVICE_CATEGORIES = ["RA", "SA", "MA", "VRV"]
 def init_session():
     defaults = {
         "last_file_key": None,
-        "current_points": [],
-        "finished_shapes": [],   # [{"points":[(x,y),...], "color":(b,g,r)}]
-        "last_click_xy": None,
+        "finished_shapes": [],   # [{"points":[(x,y),...], "color":(b,g,r), "group": str|None}]
         "claude_review": None,
-        "color_idx": 0,
         "equip_table": None,
         "group_counter": 0,
     }
@@ -46,9 +42,7 @@ def init_session():
 init_session()
 
 def reset_drawing_state():
-    st.session_state["current_points"] = []
     st.session_state["finished_shapes"] = []
-    st.session_state["last_click_xy"] = None
     st.session_state["claude_review"] = None
 
 def hex_to_bgr(hex_color: str):
@@ -165,7 +159,7 @@ def polygon_area_px2(pts):
         area += x1 * y2 - x2 * y1
     return abs(area) / 2
 
-def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndarray:
+def draw_all(base_arr: np.ndarray) -> np.ndarray:
     arr = base_arr.copy()
     for i, shape in enumerate(st.session_state["finished_shapes"]):
         color = shape["color"]
@@ -177,19 +171,6 @@ def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndar
         cv2.rectangle(arr, (cx - tw//2 - 5, cy - th - 6), (cx + tw//2 + 5, cy + 6), (255, 255, 255), -1)
         cv2.rectangle(arr, (cx - tw//2 - 5, cy - th - 6), (cx + tw//2 + 5, cy + 6), color, 2)
         cv2.putText(arr, label, (cx - tw//2, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-    cur = st.session_state["current_points"]
-    if cur:
-        for p in cur:
-            cv2.circle(arr, (int(p[0]), int(p[1])), 6, current_color_bgr, -1)
-            cv2.circle(arr, (int(p[0]), int(p[1])), 6, (255, 255, 255), 2)
-        if draw_mode == "多邊形" and len(cur) > 1:
-            pts_np = np.array(cur, dtype=np.int32)
-            cv2.polylines(arr, [pts_np], False, current_color_bgr, 2)
-        elif draw_mode == "矩形" and len(cur) == 1:
-            x, y = int(cur[0][0]), int(cur[0][1])
-            cv2.line(arr, (x, 0), (x, arr.shape[0]), current_color_bgr, 1)
-            cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
     return arr
 
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
@@ -259,122 +240,63 @@ if uploaded:
         st.caption(f"📏 目前工作圖實際像素尺寸：{disp_img.width} × {disp_img.height} px"
                    "（畫面上的框會撐滿版面顯示，所以看起來大小差不多是正常的，這裡的數字才是真的尺寸）")
 
-        with st.expander("🖊️ 框選工具", expanded=True):
-            # ── 緊湊工具列 ──────────────────────────
-            t1, t2 = st.columns([1.5, 1.5])
-            with t1:
-                scale_ratio = st.number_input(
-                    f"比例尺 1:N｜{'✅自動' if auto_scale else '⚠️手動'}",
-                    min_value=1, value=auto_scale or 100, step=10,
-                )
-            with t2:
-                picked = st.radio("顏色", COLOR_LABELS, horizontal=True, index=st.session_state["color_idx"])
-                st.session_state["color_idx"] = COLOR_LABELS.index(picked)
-                shape_color_hex = FIXED_COLORS[st.session_state["color_idx"]]
-
-            t3, t4, t5, t6 = st.columns([1.6, 1, 1, 1])
-            with t3:
-                draw_mode = st.radio("模式", ["矩形", "多邊形"], horizontal=True,
-                                      help="矩形：點第一角、再點對角自動完成。多邊形：依序點角點，點回起點附近自動封閉。")
-            with t4:
-                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-                if st.button("↩️ 復原", use_container_width=True,
-                              disabled=len(st.session_state["current_points"]) == 0):
-                    st.session_state["current_points"].pop()
-                    st.rerun()
-            with t5:
-                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-                if st.button("🗑️ 刪末框", use_container_width=True,
-                              disabled=len(st.session_state["finished_shapes"]) == 0):
-                    st.session_state["finished_shapes"].pop()
-                    st.rerun()
-            with t6:
-                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-                if st.button("🗑️ 清空", use_container_width=True):
-                    reset_drawing_state()
-                    st.rerun()
-
-            if not is_pdf:
-                st.caption("⚠️ 圖片檔沒有內建解析度資訊，面積換算準確度會比 PDF 差。")
-
-            m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
-            if m_per_px_at_render:
-                m_per_px_display = m_per_px_at_render / display_scale
-            else:
-                m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
-            m2_per_px2_display = m_per_px_display ** 2
-            current_color_bgr = hex_to_bgr(shape_color_hex)
-
-            # ── 圖面：主要區域，撐滿左欄可用寬度顯示 ──────────────────────
-            working_arr = draw_all(disp_arr_base, draw_mode, current_color_bgr)
-            click = streamlit_image_coordinates(
-                working_arr, key=f"clicker_{draw_mode}_{file_key}",
-                click_and_drag=False, image_format="JPEG",
-                use_column_width="always",
+        sc_col, clr_col = st.columns([3, 1])
+        with sc_col:
+            scale_ratio = st.number_input(
+                f"比例尺 1:N｜{'✅自動' if auto_scale else '⚠️手動'}",
+                min_value=1, value=auto_scale or 100, step=10,
             )
+        with clr_col:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("🗑️ 清空重來", use_container_width=True):
+                reset_drawing_state()
+                st.rerun()
+        if not is_pdf:
+            st.caption("⚠️ 圖片檔沒有內建解析度資訊，面積換算準確度會比 PDF 差。")
 
-            if click is not None and "x" in click:
-                disp_w = click.get("width") or disp_img.width
-                disp_h = click.get("height") or disp_img.height
-                scale_x = disp_img.width / disp_w if disp_w else 1
-                scale_y = disp_img.height / disp_h if disp_h else 1
-                real_x = click["x"] * scale_x
-                real_y = click["y"] * scale_y
+        m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
+        if m_per_px_at_render:
+            m_per_px_display = m_per_px_at_render / display_scale
+        else:
+            m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
+        m2_per_px2_display = m_per_px_display ** 2
 
-                xy = (real_x, real_y)
-                if xy != st.session_state["last_click_xy"]:
-                    st.session_state["last_click_xy"] = xy
-                    st.session_state["current_points"].append(xy)
+        working_arr = draw_all(disp_arr_base)
 
-                    if draw_mode == "矩形" and len(st.session_state["current_points"]) == 2:
-                        (x1, y1), (x2, y2) = st.session_state["current_points"]
-                        if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
-                            rect_pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-                            st.session_state["finished_shapes"].append({"points": rect_pts, "color": current_color_bgr})
-                        st.session_state["current_points"] = []
-                    elif draw_mode == "多邊形" and len(st.session_state["current_points"]) > 2:
-                        x0, y0 = st.session_state["current_points"][0]
-                        if ((xy[0]-x0)**2 + (xy[1]-y0)**2) ** 0.5 < 14:
-                            poly_pts = st.session_state["current_points"][:-1]
-                            st.session_state["finished_shapes"].append({"points": poly_pts, "color": current_color_bgr})
-                            st.session_state["current_points"] = []
+        if st.session_state["finished_shapes"]:
+            with st.expander("🤖 Claude 輔助核對（對照原圖標註每個框對應的空間，僅供參考）"):
+                results = [
+                    {"id": i + 1, "area_m2": polygon_area_px2(s["points"]) * m2_per_px2_display, "points": s["points"]}
+                    for i, s in enumerate(st.session_state["finished_shapes"])
+                ]
+                if st.button("請 Claude 協助核對"):
+                    with st.spinner("Claude 正在對照圖面檢查中…"):
+                        review_text = ask_claude_review(working_arr, results)
+                    st.session_state["claude_review"] = review_text
+                if st.session_state.get("claude_review"):
+                    st.info(st.session_state["claude_review"])
 
-                    st.rerun()
-
-            if st.session_state["finished_shapes"]:
-                with st.expander("🤖 Claude 輔助核對（對照原圖標註每個框對應的空間，僅供參考）"):
-                    results = [
-                        {"id": i + 1, "area_m2": polygon_area_px2(s["points"]) * m2_per_px2_display, "points": s["points"]}
-                        for i, s in enumerate(st.session_state["finished_shapes"])
-                    ]
-                    if st.button("請 Claude 協助核對"):
-                        with st.spinner("Claude 正在對照圖面檢查中…"):
-                            review_text = ask_claude_review(working_arr, results)
-                        st.session_state["claude_review"] = review_text
-                    if st.session_state.get("claude_review"):
-                        st.info(st.session_state["claude_review"])
-
-            if HAS_ANNOTATION_PKG:
-                with st.expander("🖱️ 矩形工具（可直接拖曳、縮放調整）", expanded=True):
-                    st.caption("畫矩形前先選顏色（下面的色塊清單），畫完可以直接拖曳邊角調整大小、"
-                               "選取後按 Delete 鍵刪除。確認後按「套用」才會加進正式的面積結果清單；"
-                               "不規則（L型等）空間請用上面「多邊形」模式逐點點出來。")
-                    try:
-                        annot_result = st_detection(
-                            disp_img, label_list=COLOR_LABELS,
-                            bboxes=[], labels=[],
-                            height=disp_img.height, width=disp_img.width,
-                            key=f"annot_{file_key}",
-                        )
-                        if annot_result and st.button("✅ 套用這些矩形到面積結果", key="apply_annot_rects"):
-                            for item in annot_result:
-                                x, y, bw, bh = item["bbox"]
-                                pts = [(x, y), (x + bw, y), (x + bw, y + bh), (x, y + bh)]
-                                color = hex_to_bgr(FIXED_COLORS[item.get("label_id", 0) % len(FIXED_COLORS)])
-                                st.session_state["finished_shapes"].append({"points": pts, "color": color})
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"矩形工具載入失敗：{e}")
+        if HAS_ANNOTATION_PKG:
+            with st.expander("🖱️ 矩形工具（可直接拖曳、縮放調整）", expanded=True):
+                st.caption("畫矩形前先選顏色（下面的色塊清單），畫完可以直接拖曳邊角調整大小、"
+                           "選取後按 Delete 鍵刪除。確認後按「套用」才會加進正式的面積結果清單；"
+                           "不規則（L型等）空間可以用多個矩形拼湊，再到右邊清單勾選合併。")
+                try:
+                    annot_result = st_detection(
+                        disp_img, label_list=COLOR_LABELS,
+                        bboxes=[], labels=[],
+                        height=disp_img.height, width=disp_img.width,
+                        key=f"annot_{file_key}",
+                    )
+                    if annot_result and st.button("✅ 套用這些矩形到面積結果", key="apply_annot_rects"):
+                        for item in annot_result:
+                            x, y, bw, bh = item["bbox"]
+                            pts = [(x, y), (x + bw, y), (x + bw, y + bh), (x, y + bh)]
+                            color = hex_to_bgr(FIXED_COLORS[item.get("label_id", 0) % len(FIXED_COLORS)])
+                            st.session_state["finished_shapes"].append({"points": pts, "color": color})
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"矩形工具載入失敗：{e}")
 
     # ── 右半部：框選後的面積結果，直向清單，不管左邊工具有沒有摺疊都一直顯示 ──────────
     with right_col:
