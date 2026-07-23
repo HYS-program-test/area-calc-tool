@@ -11,7 +11,6 @@ try:
 except Exception:
     HAS_ANNOTATION_PKG = False
 import re
-import json
 import io
 import base64
 import anthropic
@@ -36,9 +35,9 @@ def init_session():
         "finished_shapes": [],   # [{"points":[(x,y),...], "color":(b,g,r)}]
         "last_click_xy": None,
         "claude_review": None,
-        "claude_detect_analysis": None,
         "color_idx": 0,
         "equip_table": None,
+        "group_counter": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -51,7 +50,6 @@ def reset_drawing_state():
     st.session_state["finished_shapes"] = []
     st.session_state["last_click_xy"] = None
     st.session_state["claude_review"] = None
-    st.session_state["claude_detect_analysis"] = None
 
 def hex_to_bgr(hex_color: str):
     hex_color = hex_color.lstrip("#")
@@ -194,92 +192,6 @@ def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndar
             cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
     return arr
 
-def safe_resize_for_claude(img: Image.Image, max_edge=1568, max_tokens=1568, patch=28):
-    """依官方文件的規則，預先把圖片縮到「保證不會被 Claude 內部再次縮放」的範圍內
-    （長邊上限 + 視覺 token 預算兩個限制都要顧到，直向的長圖最容易只顧到長邊、忽略 token 預算）。
-    這樣送出去的圖跟 Claude 實際「看到」的圖是同一張，座標才不會對不起來。"""
-    w, h = img.size
-    scale = min(1.0, max_edge / max(w, h))
-    w2, h2 = w * scale, h * scale
-    tokens = (w2 / patch) * (h2 / patch)
-    if tokens > max_tokens:
-        area_scale = (max_tokens / tokens) ** 0.5
-        w2, h2 = w2 * area_scale, h2 * area_scale
-    w2, h2 = max(1, int(w2)), max(1, int(h2))
-    if (w2, h2) == img.size:
-        return img
-    return img.resize((w2, h2))
-
-def ask_claude_detect_rooms(disp_img: Image.Image):
-    """請 Claude 直接用視覺理解去判斷平面圖上每個獨立房間的邊界。
-    這是「語意判斷」出的草稿，精確度不會是像素級的，仍需要人工用框選工具核對調整。
-
-    座標策略（依 Anthropic 官方文件建議調整過）：
-    - 官方文件明確建議用「絕對像素座標」而不是相對比例，並且要先把圖片縮到 Claude
-      不會再內部縮放的範圍內，兩張圖（我送的、Claude 看的）才會完全一致，座標不用再換算。
-    - 直向的長圖（我們的平面圖很常見）最容易觸發「視覺 token 預算」限制而被內部縮小，
-      官方文件說這是座標對不齊最常見的原因，所以這裡改成自己先用 safe_resize_for_claude()
-      縮到安全範圍，並在 prompt 裡明講這張圖確切的像素尺寸，再回頭把 Claude 給的絕對座標
-      按比例換算回畫面顯示用的 disp_img 尺寸。"""
-    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY", None
-
-    send_img = safe_resize_for_claude(disp_img)
-    sw, sh = send_img.size
-
-    buf = io.BytesIO()
-    send_img.save(buf, format="PNG")
-    b64_img = base64.b64encode(buf.getvalue()).decode()
-
-    prompt = f"""這是一張建築平面圖，圖片確切尺寸是寬 {sw} 像素、高 {sh} 像素（左上角是像素座標
-(0, 0)，右下角是 ({sw}, {sh})）。請你判斷圖中每一個獨立的房間／空間（忽略樓梯間、電梯核心、
-純走道這類開放式流通空間，只框出有明確機能的獨立房間，例如臥室、衛浴、廚房、客廳、儲藏室等）。
-
-請分兩步驟回答：
-
-【第一步：文字分析】
-針對每一個房間，用文字描述它的四個邊界分別是什麼（例如：「臥室A：左邊到外牆、右邊到與臥室B
-之間的隔間牆、上邊到走道的牆面、下邊到與衛浴共用的牆」）。這一步是為了讓你先仔細觀察牆面位置，
-再進到第二步。
-
-【第二步：絕對像素座標】
-根據第一步的分析，把每個房間邊界轉換成角點座標——**用絕對像素座標，不要用 0~1 的相對比例**，
-數值範圍就是 0 到 {sw}（寬）、0 到 {sh}（高），跟這張圖本身的像素尺寸一致。矩形房間給 4 個
-角點，不規則（L型等）房間可以給更多角點，依第一步描述的實際牆角轉換。
-
-第二步的座標結果，請用下面這兩個標記包住，標記中間只能放 JSON，不要有其他文字：
-===JSON_START===
-[
-  {{"name": "房間名稱（看得出來就填，看不出來就填空字串）", "points": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]}},
-  ...
-]
-===JSON_END==="""
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=3072,
-            messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64_img}},
-                {"type": "text", "text": prompt},
-            ]}],
-        )
-        raw_text = response.content[0].text.strip()
-        m = re.search(r"===JSON_START===(.*?)===JSON_END===", raw_text, flags=re.DOTALL)
-        if not m:
-            return None, "⚠️ Claude 回應格式不符預期（找不到 JSON 標記），請重試", raw_text
-        json_text = re.sub(r"^```(json)?|```$", "", m.group(1).strip(), flags=re.MULTILINE).strip()
-        rooms = json.loads(json_text)
-        # 把 Claude 給的絕對像素座標（相對於 send_img 尺寸），按比例換算回 disp_img 尺寸
-        scale_x, scale_y = disp_img.width / sw, disp_img.height / sh
-        for room in rooms:
-            room["points"] = [[px * scale_x, py * scale_y] for px, py in room.get("points", [])]
-        analysis_text = raw_text.split("===JSON_START===")[0].strip()
-        return rooms, None, analysis_text
-    except Exception as e:
-        return None, f"⚠️ 呼叫 Claude 發生錯誤：{e}", None
-
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
@@ -385,40 +297,6 @@ if uploaded:
             if not is_pdf:
                 st.caption("⚠️ 圖片檔沒有內建解析度資訊，面積換算準確度會比 PDF 差。")
 
-            ai_detect_clicked = st.button("🤖 Claude 自動框選（草稿）", use_container_width=True,
-                                           help="請 Claude 用視覺判斷直接框出房間邊界，當作草稿，仍建議人工核對調整")
-            st.caption("Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。")
-
-            if ai_detect_clicked:
-                with st.spinner("Claude 正在判讀平面圖，先分析再框邊界中…"):
-                    rooms, err, analysis = ask_claude_detect_rooms(disp_img)
-                if err:
-                    st.error(err)
-                    if analysis:
-                        with st.expander("查看 Claude 原始回應（除錯用）"):
-                            st.text(analysis)
-                elif not rooms:
-                    st.warning("Claude 沒有辨識出任何房間，請改用手動框選。")
-                else:
-                    new_shapes = []
-                    for i, room in enumerate(rooms):
-                        pts = room.get("points", [])
-                        if len(pts) < 3:
-                            continue
-                        abs_pts = [(px, py) for px, py in pts]
-                        color = hex_to_bgr(FIXED_COLORS[i % len(FIXED_COLORS)])
-                        new_shapes.append({"points": abs_pts, "color": color})
-                    st.session_state["finished_shapes"] = new_shapes
-                    st.session_state["current_points"] = []
-                    if analysis:
-                        st.session_state["claude_detect_analysis"] = analysis
-                    st.success(f"Claude 框出了 {len(new_shapes)} 個房間草稿，請往下核對、用框選工具調整。")
-                    st.rerun()
-
-            if st.session_state.get("claude_detect_analysis"):
-                with st.expander("📝 Claude 的文字分析（框選依據，可對照檢查哪裡判斷錯了）"):
-                    st.text(st.session_state["claude_detect_analysis"])
-
             m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
             if m_per_px_at_render:
                 m_per_px_display = m_per_px_at_render / display_scale
@@ -477,54 +355,92 @@ if uploaded:
                         st.info(st.session_state["claude_review"])
 
             if HAS_ANNOTATION_PKG:
-                with st.expander("🧪 實驗性功能：物件式矩形框選（測試中，可能不穩定）", expanded=False):
-                    st.caption("這是另外一套元件（streamlit-image-annotation），只支援矩形，"
-                               "可以直接拖曳、縮放調整；跟上面的框選工具是各自獨立的兩套系統，"
-                               "確認滿意後按下方「套用」才會加進正式的面積結果清單。")
+                with st.expander("🖱️ 矩形工具（可直接拖曳、縮放調整）", expanded=True):
+                    st.caption("畫矩形前先選顏色（下面的色塊清單），畫完可以直接拖曳邊角調整大小、"
+                               "選取後按 Delete 鍵刪除。確認後按「套用」才會加進正式的面積結果清單；"
+                               "不規則（L型等）空間請用上面「多邊形」模式逐點點出來。")
                     try:
                         annot_result = st_detection(
-                            disp_img, label_list=["房間"],
+                            disp_img, label_list=COLOR_LABELS,
                             bboxes=[], labels=[],
                             height=disp_img.height, width=disp_img.width,
                             key=f"annot_{file_key}",
                         )
-                        if annot_result and st.button("✅ 套用這些矩形到面積結果"):
+                        if annot_result and st.button("✅ 套用這些矩形到面積結果", key="apply_annot_rects"):
                             for item in annot_result:
                                 x, y, bw, bh = item["bbox"]
                                 pts = [(x, y), (x + bw, y), (x + bw, y + bh), (x, y + bh)]
-                                color = hex_to_bgr(FIXED_COLORS[len(st.session_state["finished_shapes"]) % len(FIXED_COLORS)])
+                                color = hex_to_bgr(FIXED_COLORS[item.get("label_id", 0) % len(FIXED_COLORS)])
                                 st.session_state["finished_shapes"].append({"points": pts, "color": color})
                             st.rerun()
                     except Exception as e:
-                        st.error(f"這個實驗性元件載入失敗：{e}")
+                        st.error(f"矩形工具載入失敗：{e}")
 
     # ── 右半部：框選後的面積結果，直向清單，不管左邊工具有沒有摺疊都一直顯示 ──────────
     with right_col:
         st.markdown("##### 📊 面積結果")
+        st.caption("要把多個矩形合計成一個不規則空間（例如 L 型），勾選下面對應的幾筆、按「合併勾選項目」。")
         if st.session_state["finished_shapes"]:
-            total_m2 = sum(polygon_area_px2(s["points"]) * m2_per_px2_display for s in st.session_state["finished_shapes"])
-            delete_idx = None
-            for i, shape in enumerate(st.session_state["finished_shapes"]):
-                area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
-                b, g, r = shape["color"]
-                shapes_for_table.append({"name": f"#{i+1}", "area": round(area_m2, 2)})
-                row_col, del_col = st.columns([5, 1])
+            shapes = st.session_state["finished_shapes"]
+            # 依 group 分組：group 是 None 的自己單獨一組，其餘同 group 值的合併顯示成一列
+            groups = {}
+            for i, s in enumerate(shapes):
+                gid = s.get("group")
+                key = gid if gid is not None else f"solo_{i}"
+                groups.setdefault(key, []).append(i)
+
+            total_m2 = 0.0
+            delete_indices = []
+            selected_for_merge = []
+            group_num = 0
+            for key, idxs in groups.items():
+                group_num += 1
+                group_area_m2 = sum(polygon_area_px2(shapes[i]["points"]) * m2_per_px2_display for i in idxs)
+                total_m2 += group_area_m2
+                b, g, r = shapes[idxs[0]]["color"]
+                label = f"#{group_num}" if len(idxs) == 1 else f"#{group_num}（合併 {len(idxs)} 筆）"
+                shapes_for_table.append({"name": label, "area": round(group_area_m2, 2)})
+
+                chk_col, row_col, del_col = st.columns([0.6, 4.4, 1])
+                with chk_col:
+                    checked = st.checkbox("", key=f"merge_chk_{key}", label_visibility="collapsed")
+                    if checked:
+                        selected_for_merge.append(idxs)
                 with row_col:
                     st.markdown(
                         f"<div style='display:flex;justify-content:space-between;align-items:center;"
                         f"padding:8px 12px;margin-bottom:6px;border-radius:6px;"
                         f"background:rgba({r},{g},{b},0.10);border-left:4px solid rgb({r},{g},{b})'>"
-                        f"<b style='color:rgb({r},{g},{b})'>#{i+1}</b>"
-                        f"<span>{area_m2:.2f} m²　<span style='color:#888;font-size:.85em'>"
-                        f"({area_m2/PING_PER_M2:.2f} 坪)</span></span></div>",
+                        f"<b style='color:rgb({r},{g},{b})'>{label}</b>"
+                        f"<span>{group_area_m2:.2f} m²　<span style='color:#888;font-size:.85em'>"
+                        f"({group_area_m2/PING_PER_M2:.2f} 坪)</span></span></div>",
                         unsafe_allow_html=True,
                     )
                 with del_col:
-                    if st.button("✕", key=f"del_area_shape_{i}", help="刪除這一筆"):
-                        delete_idx = i
-            if delete_idx is not None:
-                st.session_state["finished_shapes"].pop(delete_idx)
+                    if st.button("✕", key=f"del_area_shape_{key}", help="刪除這一筆（合併的會整組刪除）"):
+                        delete_indices.extend(idxs)
+
+            m_col1, m_col2 = st.columns(2)
+            with m_col1:
+                if st.button("🔗 合併勾選項目", use_container_width=True,
+                              disabled=len(selected_for_merge) < 2):
+                    st.session_state["group_counter"] += 1
+                    new_gid = f"g{st.session_state['group_counter']}"
+                    for idxs in selected_for_merge:
+                        for i in idxs:
+                            shapes[i]["group"] = new_gid
+                    st.rerun()
+            with m_col2:
+                if st.button("✂️ 全部取消合併", use_container_width=True):
+                    for s in shapes:
+                        s.pop("group", None)
+                    st.rerun()
+
+            if delete_indices:
+                for i in sorted(set(delete_indices), reverse=True):
+                    shapes.pop(i)
                 st.rerun()
+
             st.divider()
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:8px 12px;"
