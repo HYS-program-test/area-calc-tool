@@ -5,6 +5,11 @@ import pandas as pd
 from PIL import Image
 import fitz  # PyMuPDF
 from streamlit_image_coordinates import streamlit_image_coordinates
+try:
+    from streamlit_image_annotation import detection as st_detection
+    HAS_ANNOTATION_PKG = True
+except Exception:
+    HAS_ANNOTATION_PKG = False
 import re
 import json
 import io
@@ -471,24 +476,55 @@ if uploaded:
                     if st.session_state.get("claude_review"):
                         st.info(st.session_state["claude_review"])
 
+            if HAS_ANNOTATION_PKG:
+                with st.expander("🧪 實驗性功能：物件式矩形框選（測試中，可能不穩定）", expanded=False):
+                    st.caption("這是另外一套元件（streamlit-image-annotation），只支援矩形，"
+                               "可以直接拖曳、縮放調整；跟上面的框選工具是各自獨立的兩套系統，"
+                               "確認滿意後按下方「套用」才會加進正式的面積結果清單。")
+                    try:
+                        annot_result = st_detection(
+                            disp_img, label_list=["房間"],
+                            bboxes=[], labels=[],
+                            height=disp_img.height, width=disp_img.width,
+                            key=f"annot_{file_key}",
+                        )
+                        if annot_result and st.button("✅ 套用這些矩形到面積結果"):
+                            for item in annot_result:
+                                x, y, bw, bh = item["bbox"]
+                                pts = [(x, y), (x + bw, y), (x + bw, y + bh), (x, y + bh)]
+                                color = hex_to_bgr(FIXED_COLORS[len(st.session_state["finished_shapes"]) % len(FIXED_COLORS)])
+                                st.session_state["finished_shapes"].append({"points": pts, "color": color})
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"這個實驗性元件載入失敗：{e}")
+
     # ── 右半部：框選後的面積結果，直向清單，不管左邊工具有沒有摺疊都一直顯示 ──────────
     with right_col:
         st.markdown("##### 📊 面積結果")
         if st.session_state["finished_shapes"]:
             total_m2 = sum(polygon_area_px2(s["points"]) * m2_per_px2_display for s in st.session_state["finished_shapes"])
+            delete_idx = None
             for i, shape in enumerate(st.session_state["finished_shapes"]):
                 area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
                 b, g, r = shape["color"]
                 shapes_for_table.append({"name": f"#{i+1}", "area": round(area_m2, 2)})
-                st.markdown(
-                    f"<div style='display:flex;justify-content:space-between;align-items:center;"
-                    f"padding:8px 12px;margin-bottom:6px;border-radius:6px;"
-                    f"background:rgba({r},{g},{b},0.10);border-left:4px solid rgb({r},{g},{b})'>"
-                    f"<b style='color:rgb({r},{g},{b})'>#{i+1}</b>"
-                    f"<span>{area_m2:.2f} m²　<span style='color:#888;font-size:.85em'>"
-                    f"({area_m2/PING_PER_M2:.2f} 坪)</span></span></div>",
-                    unsafe_allow_html=True,
-                )
+                row_col, del_col = st.columns([5, 1])
+                with row_col:
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;align-items:center;"
+                        f"padding:8px 12px;margin-bottom:6px;border-radius:6px;"
+                        f"background:rgba({r},{g},{b},0.10);border-left:4px solid rgb({r},{g},{b})'>"
+                        f"<b style='color:rgb({r},{g},{b})'>#{i+1}</b>"
+                        f"<span>{area_m2:.2f} m²　<span style='color:#888;font-size:.85em'>"
+                        f"({area_m2/PING_PER_M2:.2f} 坪)</span></span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with del_col:
+                    if st.button("✕", key=f"del_area_shape_{i}", help="刪除這一筆"):
+                        delete_idx = i
+            if delete_idx is not None:
+                st.session_state["finished_shapes"].pop(delete_idx)
+                st.rerun()
             st.divider()
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:8px 12px;"
