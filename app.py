@@ -379,33 +379,86 @@ if not indoor_models:
     st.caption("⚠️ 尚未連上設備資料表（Google Sheets），室內機下拉選單目前是空的。"
                "需要在 Streamlit Cloud 的 Secrets 加入 `gcp_service_account` 服務帳號設定才能抓到真實機型清單。")
 
+# ─────────────────────────────────────────────
+# 空調負載及選機
+# ─────────────────────────────────────────────
+st.divider()
+st.markdown("#### ❄️ 空調負載及選機")
+
+indoor_models, equip_lookup = load_equipment_data()
+if not indoor_models:
+    st.caption("⚠️ 尚未連上設備資料表（Google Sheets），室內機下拉選單目前是空的。"
+               "需要在 Streamlit Cloud 的 Secrets 加入 `gcp_service_account` 服務帳號設定才能抓到真實機型清單。")
+
+DERIVED_KEYS = ["需求冷房能力", "類型", "室內機冷房能力", "室外機", "連結率"]
+
+def compute_derived(row):
+    area = row.get("面積(m²)", 0) or 0
+    load = row.get("每坪建議負荷值", 800) or 800
+    demand = round(area / 3.3 * load) if area else 0
+    indoor = row.get("室內機", "")
+    info = equip_lookup.get(indoor, {})
+    equip_type = info.get("類型", "")
+    return {
+        "需求冷房能力": demand,
+        "類型": equip_type,
+        "室內機冷房能力": info.get("室內機冷房能力", ""),
+        "室外機": info.get("室外機", ""),
+        "連結率": row.get("連結率", "") if "VRV" in equip_type.upper() else "",
+    }
+
+def on_equip_edit():
+    """只有在儲存格真的『編輯完成』時，Streamlit 才會觸發這個 callback，
+    這裡才去重算自動欄位——不是每次頁面重新整理都重算，才不會干擾正在操作中的下拉選單。"""
+    diff = st.session_state.get("equip_data_editor", {})
+    table = st.session_state["equip_table"]
+
+    for idx_str, changes in diff.get("edited_rows", {}).items():
+        idx = int(idx_str)
+        if idx < len(table):
+            table[idx].update(changes)
+            table[idx].update(compute_derived(table[idx]))
+
+    for new_row in diff.get("added_rows", []):
+        row = {
+            "編號": f"#{len(table)+1}", "空間名稱": new_row.get("空間名稱", ""),
+            "面積(m²)": new_row.get("面積(m²)", 0.0),
+            "每坪建議負荷值": new_row.get("每坪建議負荷值", 800),
+            "室內機": new_row.get("室內機", ""),
+        }
+        row.update(compute_derived(row))
+        table.append(row)
+
+    for idx in sorted(diff.get("deleted_rows", []), reverse=True):
+        if idx < len(table):
+            table.pop(idx)
+
+    st.session_state["equip_table"] = table
+
 # 用目前框選到的空間，依「編號」帶入表格；空間名稱可自由改，不會因為重新框選就被蓋掉
 if shapes_for_table:
     existing = {row.get("編號"): row for row in (st.session_state["equip_table"] or [])}
     rows = []
     for s in shapes_for_table:
         prev = existing.get(s["name"], {})
-        rows.append({
+        base = {
             "編號": s["name"],
             "空間名稱": prev.get("空間名稱", ""),
             "面積(m²)": s["area"],
             "每坪建議負荷值": prev.get("每坪建議負荷值", 800),
             "室內機": prev.get("室內機", ""),
-            "連結率": prev.get("連結率", ""),
-        })
+        }
+        base.update({k: prev.get(k, "") for k in DERIVED_KEYS} if prev else compute_derived(base))
+        rows.append(base)
     st.session_state["equip_table"] = rows
 
 df_source = st.session_state["equip_table"] or [
-    {"編號": "#1", "空間名稱": "", "面積(m²)": 0.0, "每坪建議負荷值": 800, "室內機": "", "連結率": ""}
+    {"編號": "#1", "空間名稱": "", "面積(m²)": 0.0, "每坪建議負荷值": 800, "室內機": "",
+     "需求冷房能力": 0, "類型": "", "室內機冷房能力": "", "室外機": "", "連結率": ""}
 ]
-
-# 實測確認過：合併成單一表格會讓下拉選單「要點兩次才選得到」的問題回來
-# （自動算出來的欄位每次重繪都要重新算，把編輯中的下拉選單狀態打斷），
-# 所以維持拆兩張表的做法，只把樣式調成盡量像同一張表、間距縮小、不特別強調分界。
 df = pd.DataFrame(df_source)
 
-st.markdown("<div style='margin-bottom:-14px'></div>", unsafe_allow_html=True)
-edited_df = st.data_editor(
+st.data_editor(
     df,
     num_rows="dynamic",
     use_container_width=True,
@@ -414,29 +467,14 @@ edited_df = st.data_editor(
         "空間名稱": st.column_config.TextColumn("空間名稱"),
         "面積(m²)": st.column_config.NumberColumn("面積(m²)", min_value=0.0, step=0.1, format="%.2f"),
         "每坪建議負荷值": st.column_config.SelectboxColumn("每坪建議負荷值", options=LOAD_OPTIONS, required=True),
+        "需求冷房能力": st.column_config.NumberColumn("需求冷房能力", disabled=True,
+                                                     help="= 面積(m²) ÷ 3.3 × 每坪建議負荷值"),
         "室內機": st.column_config.SelectboxColumn("室內機", options=indoor_models or [""]),
+        "類型": st.column_config.TextColumn("類型", disabled=True, help="依選定的室內機自動帶出"),
+        "室內機冷房能力": st.column_config.TextColumn("室內機冷房能力", disabled=True),
+        "室外機": st.column_config.TextColumn("室外機", disabled=True, help="依選定的室內機自動帶出"),
         "連結率": st.column_config.TextColumn("連結率", help="僅 VRV 系列需要填寫"),
     },
     key="equip_data_editor",
+    on_change=on_equip_edit,
 )
-st.session_state["equip_table"] = edited_df.to_dict("records")
-
-# 計算結果：緊接在編輯表格下方，不加標題與分隔線，視覺上盡量像同一張表的延伸欄位
-computed_rows = []
-for row in edited_df.to_dict("records"):
-    area = row.get("面積(m²)", 0) or 0
-    load = row.get("每坪建議負荷值", 800) or 800
-    demand = round(area / 3.3 * load) if area else 0
-    indoor = row.get("室內機", "")
-    info = equip_lookup.get(indoor, {})
-    equip_type = info.get("類型", "")
-    computed_rows.append({
-        "編號": row.get("編號", ""),
-        "需求冷房能力": demand,
-        "類型": equip_type,
-        "室內機冷房能力": info.get("室內機冷房能力", ""),
-        "室外機": info.get("室外機", ""),
-        "連結率": row.get("連結率", "") if "VRV" in equip_type.upper() else "",
-    })
-st.markdown("<div style='margin-top:-14px'></div>", unsafe_allow_html=True)
-st.dataframe(pd.DataFrame(computed_rows), use_container_width=True, hide_index=True)
