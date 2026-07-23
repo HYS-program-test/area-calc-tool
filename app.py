@@ -189,44 +189,64 @@ def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndar
             cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
     return arr
 
-def ask_claude_detect_rooms(disp_img: Image.Image):
-    """請 Claude 直接用視覺理解去判斷平面圖上每個獨立房間的邊界，
-    回傳每個房間的頂點座標（用 0~1 的相對比例，不用絕對像素——
-    這對視覺模型來說通常估得比絕對像素座標準，我們自己再換算回實際像素）。
-    這是「語意判斷」出的草稿，精確度不會是像素級的，仍需要人工用框選工具核對調整。
-    送進來的 disp_img 就是使用者在上方選定尺寸後的那一份工作圖，跟畫面顯示、框選用的是同一份。
+def safe_resize_for_claude(img: Image.Image, max_edge=1568, max_tokens=1568, patch=28):
+    """依官方文件的規則，預先把圖片縮到「保證不會被 Claude 內部再次縮放」的範圍內
+    （長邊上限 + 視覺 token 預算兩個限制都要顧到，直向的長圖最容易只顧到長邊、忽略 token 預算）。
+    這樣送出去的圖跟 Claude 實際「看到」的圖是同一張，座標才不會對不起來。"""
+    w, h = img.size
+    scale = min(1.0, max_edge / max(w, h))
+    w2, h2 = w * scale, h * scale
+    tokens = (w2 / patch) * (h2 / patch)
+    if tokens > max_tokens:
+        area_scale = (max_tokens / tokens) ** 0.5
+        w2, h2 = w2 * area_scale, h2 * area_scale
+    w2, h2 = max(1, int(w2)), max(1, int(h2))
+    if (w2, h2) == img.size:
+        return img
+    return img.resize((w2, h2))
 
-    採用「先文字分析、再給座標」的兩段式做法：先請 Claude 用文字描述每個房間的邊界依據
-    （哪一側是外牆、哪一側是隔間牆、哪一側是門），再根據這段分析轉換成座標——
-    目的是強迫它先想清楚再回答，而不是直接憑直覺猜數字，理論上有機會提高精準度。"""
+def ask_claude_detect_rooms(disp_img: Image.Image):
+    """請 Claude 直接用視覺理解去判斷平面圖上每個獨立房間的邊界。
+    這是「語意判斷」出的草稿，精確度不會是像素級的，仍需要人工用框選工具核對調整。
+
+    座標策略（依 Anthropic 官方文件建議調整過）：
+    - 官方文件明確建議用「絕對像素座標」而不是相對比例，並且要先把圖片縮到 Claude
+      不會再內部縮放的範圍內，兩張圖（我送的、Claude 看的）才會完全一致，座標不用再換算。
+    - 直向的長圖（我們的平面圖很常見）最容易觸發「視覺 token 預算」限制而被內部縮小，
+      官方文件說這是座標對不齊最常見的原因，所以這裡改成自己先用 safe_resize_for_claude()
+      縮到安全範圍，並在 prompt 裡明講這張圖確切的像素尺寸，再回頭把 Claude 給的絕對座標
+      按比例換算回畫面顯示用的 disp_img 尺寸。"""
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY", None
 
+    send_img = safe_resize_for_claude(disp_img)
+    sw, sh = send_img.size
+
     buf = io.BytesIO()
-    disp_img.save(buf, format="PNG")
+    send_img.save(buf, format="PNG")
     b64_img = base64.b64encode(buf.getvalue()).decode()
 
-    prompt = """這是一張建築平面圖。請你判斷圖中每一個獨立的房間／空間（忽略樓梯間、電梯核心、
+    prompt = f"""這是一張建築平面圖，圖片確切尺寸是寬 {sw} 像素、高 {sh} 像素（左上角是像素座標
+(0, 0)，右下角是 ({sw}, {sh})）。請你判斷圖中每一個獨立的房間／空間（忽略樓梯間、電梯核心、
 純走道這類開放式流通空間，只框出有明確機能的獨立房間，例如臥室、衛浴、廚房、客廳、儲藏室等）。
 
 請分兩步驟回答：
 
 【第一步：文字分析】
 針對每一個房間，用文字描述它的四個邊界分別是什麼（例如：「臥室A：左邊到外牆、右邊到與臥室B
-之間的隔間牆、上邊到走道的牆面、下邊到與衛浴共用的牆」），並描述這個房間大概涵蓋圖面寬度／
-高度的百分比範圍（例如：「大約在圖面寬度 5%~40%、高度 5%~42% 的範圍內」）。這一步是為了讓你
-先仔細觀察牆面位置，再進到第二步。
+之間的隔間牆、上邊到走道的牆面、下邊到與衛浴共用的牆」）。這一步是為了讓你先仔細觀察牆面位置，
+再進到第二步。
 
-【第二步：座標】
-根據第一步的分析，把每個房間邊界轉換成角點座標。座標請用「相對比例」表示：
-左上角是 (0, 0)，右下角是 (1, 1)。矩形房間給 4 個角點，不規則（L型等）房間可以給更多角點，
-依第一步描述的實際牆角轉換，不要跟第一步的分析矛盾。
+【第二步：絕對像素座標】
+根據第一步的分析，把每個房間邊界轉換成角點座標——**用絕對像素座標，不要用 0~1 的相對比例**，
+數值範圍就是 0 到 {sw}（寬）、0 到 {sh}（高），跟這張圖本身的像素尺寸一致。矩形房間給 4 個
+角點，不規則（L型等）房間可以給更多角點，依第一步描述的實際牆角轉換。
 
 第二步的座標結果，請用下面這兩個標記包住，標記中間只能放 JSON，不要有其他文字：
 ===JSON_START===
 [
-  {"name": "房間名稱（看得出來就填，看不出來就填空字串）", "points": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]},
+  {{"name": "房間名稱（看得出來就填，看不出來就填空字串）", "points": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]}},
   ...
 ]
 ===JSON_END==="""
@@ -246,6 +266,10 @@ def ask_claude_detect_rooms(disp_img: Image.Image):
             return None, "⚠️ Claude 回應格式不符預期（找不到 JSON 標記），請重試", raw_text
         json_text = re.sub(r"^```(json)?|```$", "", m.group(1).strip(), flags=re.MULTILINE).strip()
         rooms = json.loads(json_text)
+        # 把 Claude 給的絕對像素座標（相對於 send_img 尺寸），按比例換算回 disp_img 尺寸
+        scale_x, scale_y = disp_img.width / sw, disp_img.height / sh
+        for room in rooms:
+            room["points"] = [[px * scale_x, py * scale_y] for px, py in room.get("points", [])]
         analysis_text = raw_text.split("===JSON_START===")[0].strip()
         return rooms, None, analysis_text
     except Exception as e:
@@ -377,13 +401,12 @@ if uploaded:
                 elif not rooms:
                     st.warning("Claude 沒有辨識出任何房間，請改用手動框選。")
                 else:
-                    w, h = disp_img.width, disp_img.height
                     new_shapes = []
                     for i, room in enumerate(rooms):
                         pts = room.get("points", [])
                         if len(pts) < 3:
                             continue
-                        abs_pts = [(px * w, py * h) for px, py in pts]
+                        abs_pts = [(px, py) for px, py in pts]
                         color = hex_to_bgr(FIXED_COLORS[i % len(FIXED_COLORS)])
                         new_shapes.append({"points": abs_pts, "color": color})
                     st.session_state["finished_shapes"] = new_shapes
