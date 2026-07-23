@@ -191,17 +191,23 @@ def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndar
             cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
     return arr
 
-def ask_claude_detect_rooms(disp_img: Image.Image):
+def ask_claude_detect_rooms(disp_img: Image.Image, send_width: int = 1150):
     """請 Claude 直接用視覺理解去判斷平面圖上每個獨立房間的邊界，
     回傳每個房間的頂點座標（用 0~1 的相對比例，不用絕對像素——
     這對視覺模型來說通常估得比絕對像素座標準，我們自己再換算回實際像素）。
-    這是「語意判斷」出的草稿，精確度不會是像素級的，仍需要人工用框選工具核對調整。"""
+    這是「語意判斷」出的草稿，精確度不會是像素級的，仍需要人工用框選工具核對調整。
+    send_width 控制實際送給 Claude 的圖片寬度，用來測試不同尺寸對辨識精準度的影響。"""
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY"
 
+    send_img = disp_img
+    if send_width and send_width < disp_img.width:
+        ratio = send_width / disp_img.width
+        send_img = disp_img.resize((send_width, int(disp_img.height * ratio)))
+
     buf = io.BytesIO()
-    disp_img.save(buf, format="PNG")
+    send_img.save(buf, format="PNG")
     b64_img = base64.b64encode(buf.getvalue()).decode()
 
     prompt = """這是一張建築平面圖。請你判斷圖中每一個獨立的房間／空間（忽略樓梯間、電梯核心、
@@ -328,16 +334,23 @@ if uploaded:
         if not is_pdf:
             st.caption("⚠️ 圖片檔沒有內建解析度資訊，面積換算準確度會比 PDF 差。")
 
-        ai_col1, ai_col2 = st.columns([1.3, 4])
+        ai_col1, ai_col2, ai_col3 = st.columns([1.3, 1.1, 2.6])
         with ai_col1:
             ai_detect_clicked = st.button("🤖 Claude 自動框選（草稿）", use_container_width=True,
                                            help="請 Claude 用視覺判斷直接框出房間邊界，當作草稿，仍建議人工核對調整")
         with ai_col2:
-            st.caption("Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。")
+            send_size_label = st.selectbox("送圖尺寸", ["小 (600px)", "中 (900px)", "原尺寸"], index=2,
+                                            label_visibility="collapsed")
+        with ai_col3:
+            st.caption("Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。"
+                       "「送圖尺寸」可以用來比較不同大小的辨識結果。")
+
+        send_width_map = {"小 (600px)": 600, "中 (900px)": 900, "原尺寸": disp_img.width}
+        send_width = send_width_map[send_size_label]
 
         if ai_detect_clicked:
-            with st.spinner("Claude 正在判讀平面圖，框出房間邊界中…"):
-                rooms, err = ask_claude_detect_rooms(disp_img)
+            with st.spinner(f"Claude 正在判讀平面圖（送圖寬度 {send_width}px），框出房間邊界中…"):
+                rooms, err = ask_claude_detect_rooms(disp_img, send_width)
             if err:
                 st.error(err)
             elif not rooms:
