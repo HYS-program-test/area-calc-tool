@@ -93,9 +93,6 @@ def load_equipment_data():
     except Exception:
         return [], {}
 
-    except Exception:
-        return []
-
 # ─────────────────────────────────────────────
 # 圖片載入 / 裁切 / 縮放（快取，避免每次互動都重新運算造成卡頓）
 # ─────────────────────────────────────────────
@@ -298,168 +295,164 @@ if uploaded:
 
     disp_img, display_scale = resize_display_cached(img_cropped, f"{file_key}_{working_width}", working_width)
     disp_arr_base = np.array(disp_img)
-    st.caption(f"📏 目前工作圖實際像素尺寸：{disp_img.width} × {disp_img.height} px"
-               "（畫面上的框會撐滿版面顯示，所以看起來大小差不多是正常的，這裡的數字才是真的尺寸）")
 
-    with st.expander("🖊️ 框選工具", expanded=True):
-        # ── 緊湊工具列 ──────────────────────────
-        t1, t2, t3, t4, t5, t6 = st.columns([1.2, 1.6, 2, 1, 1, 1])
-        with t1:
-            scale_ratio = st.number_input(
-                f"比例尺 1:N｜{'✅自動' if auto_scale else '⚠️手動'}",
-                min_value=1, value=auto_scale or 100, step=10,
-            )
-        with t2:
-            picked = st.radio("顏色", COLOR_LABELS, horizontal=True, index=st.session_state["color_idx"])
-            st.session_state["color_idx"] = COLOR_LABELS.index(picked)
-            shape_color_hex = FIXED_COLORS[st.session_state["color_idx"]]
-        with t3:
-            draw_mode = st.radio("模式", ["矩形", "多邊形"], horizontal=True,
-                                  help="矩形：點第一角、再點對角自動完成。多邊形：依序點角點，點回起點附近自動封閉。")
-        with t4:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("↩️ 復原", use_container_width=True,
-                          disabled=len(st.session_state["current_points"]) == 0):
-                st.session_state["current_points"].pop()
-                st.rerun()
-        with t5:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("🗑️ 刪末框", use_container_width=True,
-                          disabled=len(st.session_state["finished_shapes"]) == 0):
-                st.session_state["finished_shapes"].pop()
-                st.rerun()
-        with t6:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("🗑️ 清空", use_container_width=True):
-                reset_drawing_state()
-                st.rerun()
+    left_col, right_col = st.columns([1, 1])
 
-        if not is_pdf:
-            st.caption("⚠️ 圖片檔沒有內建解析度資訊，面積換算準確度會比 PDF 差。")
+    with left_col:
+        st.caption(f"📏 目前工作圖實際像素尺寸：{disp_img.width} × {disp_img.height} px"
+                   "（畫面上的框會撐滿版面顯示，所以看起來大小差不多是正常的，這裡的數字才是真的尺寸）")
 
-        ai_col1, ai_col2 = st.columns([1.3, 4])
-        with ai_col1:
+        with st.expander("🖊️ 框選工具", expanded=True):
+            # ── 緊湊工具列 ──────────────────────────
+            t1, t2 = st.columns([1.5, 1.5])
+            with t1:
+                scale_ratio = st.number_input(
+                    f"比例尺 1:N｜{'✅自動' if auto_scale else '⚠️手動'}",
+                    min_value=1, value=auto_scale or 100, step=10,
+                )
+            with t2:
+                picked = st.radio("顏色", COLOR_LABELS, horizontal=True, index=st.session_state["color_idx"])
+                st.session_state["color_idx"] = COLOR_LABELS.index(picked)
+                shape_color_hex = FIXED_COLORS[st.session_state["color_idx"]]
+
+            t3, t4, t5, t6 = st.columns([1.6, 1, 1, 1])
+            with t3:
+                draw_mode = st.radio("模式", ["矩形", "多邊形"], horizontal=True,
+                                      help="矩形：點第一角、再點對角自動完成。多邊形：依序點角點，點回起點附近自動封閉。")
+            with t4:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                if st.button("↩️ 復原", use_container_width=True,
+                              disabled=len(st.session_state["current_points"]) == 0):
+                    st.session_state["current_points"].pop()
+                    st.rerun()
+            with t5:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                if st.button("🗑️ 刪末框", use_container_width=True,
+                              disabled=len(st.session_state["finished_shapes"]) == 0):
+                    st.session_state["finished_shapes"].pop()
+                    st.rerun()
+            with t6:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                if st.button("🗑️ 清空", use_container_width=True):
+                    reset_drawing_state()
+                    st.rerun()
+
+            if not is_pdf:
+                st.caption("⚠️ 圖片檔沒有內建解析度資訊，面積換算準確度會比 PDF 差。")
+
             ai_detect_clicked = st.button("🤖 Claude 自動框選（草稿）", use_container_width=True,
                                            help="請 Claude 用視覺判斷直接框出房間邊界，當作草稿，仍建議人工核對調整")
-        with ai_col2:
-            st.caption(f"目前用「{size_label}」這份圖送給 Claude 辨識，跟上方顯示、框選用的是同一份圖。"
+            st.caption(f"目前用「{size_label}」這份圖送給 Claude 辨識，跟顯示、框選用的是同一份圖。"
                        "Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。")
 
-        if ai_detect_clicked:
-            with st.spinner(f"Claude 正在判讀平面圖（{size_label}），框出房間邊界中…"):
-                rooms, err = ask_claude_detect_rooms(disp_img)
-            if err:
-                st.error(err)
-            elif not rooms:
-                st.warning("Claude 沒有辨識出任何房間，請改用手動框選。")
-            else:
-                w, h = disp_img.width, disp_img.height
-                new_shapes = []
-                for i, room in enumerate(rooms):
-                    pts = room.get("points", [])
-                    if len(pts) < 3:
-                        continue
-                    abs_pts = [(px * w, py * h) for px, py in pts]
-                    color = hex_to_bgr(FIXED_COLORS[i % len(FIXED_COLORS)])
-                    new_shapes.append({"points": abs_pts, "color": color})
-                st.session_state["finished_shapes"] = new_shapes
-                st.session_state["current_points"] = []
-                st.success(f"Claude 框出了 {len(new_shapes)} 個房間草稿，請往下核對、用框選工具調整。")
-                st.rerun()
-
-        m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
-        if m_per_px_at_render:
-            m_per_px_display = m_per_px_at_render / display_scale
-        else:
-            m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
-        m2_per_px2_display = m_per_px_display ** 2
-        current_color_bgr = hex_to_bgr(shape_color_hex)
-
-        # ── 圖面：主要區域，撐滿可用寬度顯示 ──────────────────────
-        working_arr = draw_all(disp_arr_base, draw_mode, current_color_bgr)
-        click = streamlit_image_coordinates(
-            working_arr, key=f"clicker_{draw_mode}_{file_key}",
-            click_and_drag=False, image_format="JPEG",
-            use_column_width="always",
-        )
-
-        if click is not None and "x" in click:
-            disp_w = click.get("width") or disp_img.width
-            disp_h = click.get("height") or disp_img.height
-            scale_x = disp_img.width / disp_w if disp_w else 1
-            scale_y = disp_img.height / disp_h if disp_h else 1
-            real_x = click["x"] * scale_x
-            real_y = click["y"] * scale_y
-
-            xy = (real_x, real_y)
-            if xy != st.session_state["last_click_xy"]:
-                st.session_state["last_click_xy"] = xy
-                st.session_state["current_points"].append(xy)
-
-                if draw_mode == "矩形" and len(st.session_state["current_points"]) == 2:
-                    (x1, y1), (x2, y2) = st.session_state["current_points"]
-                    if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
-                        rect_pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-                        st.session_state["finished_shapes"].append({"points": rect_pts, "color": current_color_bgr})
+            if ai_detect_clicked:
+                with st.spinner(f"Claude 正在判讀平面圖（{size_label}），框出房間邊界中…"):
+                    rooms, err = ask_claude_detect_rooms(disp_img)
+                if err:
+                    st.error(err)
+                elif not rooms:
+                    st.warning("Claude 沒有辨識出任何房間，請改用手動框選。")
+                else:
+                    w, h = disp_img.width, disp_img.height
+                    new_shapes = []
+                    for i, room in enumerate(rooms):
+                        pts = room.get("points", [])
+                        if len(pts) < 3:
+                            continue
+                        abs_pts = [(px * w, py * h) for px, py in pts]
+                        color = hex_to_bgr(FIXED_COLORS[i % len(FIXED_COLORS)])
+                        new_shapes.append({"points": abs_pts, "color": color})
+                    st.session_state["finished_shapes"] = new_shapes
                     st.session_state["current_points"] = []
-                elif draw_mode == "多邊形" and len(st.session_state["current_points"]) > 2:
-                    x0, y0 = st.session_state["current_points"][0]
-                    if ((xy[0]-x0)**2 + (xy[1]-y0)**2) ** 0.5 < 14:
-                        poly_pts = st.session_state["current_points"][:-1]
-                        st.session_state["finished_shapes"].append({"points": poly_pts, "color": current_color_bgr})
+                    st.success(f"Claude 框出了 {len(new_shapes)} 個房間草稿，請往下核對、用框選工具調整。")
+                    st.rerun()
+
+            m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
+            if m_per_px_at_render:
+                m_per_px_display = m_per_px_at_render / display_scale
+            else:
+                m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
+            m2_per_px2_display = m_per_px_display ** 2
+            current_color_bgr = hex_to_bgr(shape_color_hex)
+
+            # ── 圖面：主要區域，撐滿左欄可用寬度顯示 ──────────────────────
+            working_arr = draw_all(disp_arr_base, draw_mode, current_color_bgr)
+            click = streamlit_image_coordinates(
+                working_arr, key=f"clicker_{draw_mode}_{file_key}",
+                click_and_drag=False, image_format="JPEG",
+                use_column_width="always",
+            )
+
+            if click is not None and "x" in click:
+                disp_w = click.get("width") or disp_img.width
+                disp_h = click.get("height") or disp_img.height
+                scale_x = disp_img.width / disp_w if disp_w else 1
+                scale_y = disp_img.height / disp_h if disp_h else 1
+                real_x = click["x"] * scale_x
+                real_y = click["y"] * scale_y
+
+                xy = (real_x, real_y)
+                if xy != st.session_state["last_click_xy"]:
+                    st.session_state["last_click_xy"] = xy
+                    st.session_state["current_points"].append(xy)
+
+                    if draw_mode == "矩形" and len(st.session_state["current_points"]) == 2:
+                        (x1, y1), (x2, y2) = st.session_state["current_points"]
+                        if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
+                            rect_pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+                            st.session_state["finished_shapes"].append({"points": rect_pts, "color": current_color_bgr})
                         st.session_state["current_points"] = []
+                    elif draw_mode == "多邊形" and len(st.session_state["current_points"]) > 2:
+                        x0, y0 = st.session_state["current_points"][0]
+                        if ((xy[0]-x0)**2 + (xy[1]-y0)**2) ** 0.5 < 14:
+                            poly_pts = st.session_state["current_points"][:-1]
+                            st.session_state["finished_shapes"].append({"points": poly_pts, "color": current_color_bgr})
+                            st.session_state["current_points"] = []
 
-                st.rerun()
+                    st.rerun()
 
+            if st.session_state["finished_shapes"]:
+                with st.expander("🤖 Claude 輔助核對（對照原圖標註每個框對應的空間，僅供參考）"):
+                    results = [
+                        {"id": i + 1, "area_m2": polygon_area_px2(s["points"]) * m2_per_px2_display, "points": s["points"]}
+                        for i, s in enumerate(st.session_state["finished_shapes"])
+                    ]
+                    if st.button("請 Claude 協助核對"):
+                        with st.spinner("Claude 正在對照圖面檢查中…"):
+                            review_text = ask_claude_review(working_arr, results)
+                        st.session_state["claude_review"] = review_text
+                    if st.session_state.get("claude_review"):
+                        st.info(st.session_state["claude_review"])
+
+    # ── 右半部：框選後的面積結果，直向清單，不管左邊工具有沒有摺疊都一直顯示 ──────────
+    with right_col:
+        st.markdown("##### 📊 面積結果")
         if st.session_state["finished_shapes"]:
-            with st.expander("🤖 Claude 輔助核對（對照原圖標註每個框對應的空間，僅供參考）"):
-                results = [
-                    {"id": i + 1, "area_m2": polygon_area_px2(s["points"]) * m2_per_px2_display, "points": s["points"]}
-                    for i, s in enumerate(st.session_state["finished_shapes"])
-                ]
-                if st.button("請 Claude 協助核對"):
-                    with st.spinner("Claude 正在對照圖面檢查中…"):
-                        review_text = ask_claude_review(working_arr, results)
-                    st.session_state["claude_review"] = review_text
-                if st.session_state.get("claude_review"):
-                    st.info(st.session_state["claude_review"])
-
-    # ── 結果列：不管框選工具有沒有摺疊，都一直顯示 ──────────────────────
-    if st.session_state["finished_shapes"]:
-        total_m2 = sum(polygon_area_px2(s["points"]) * m2_per_px2_display for s in st.session_state["finished_shapes"])
-        res_cols = st.columns(min(len(st.session_state["finished_shapes"]), 8) + 1)
-        for i, shape in enumerate(st.session_state["finished_shapes"][:8]):
-            area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
-            b, g, r = shape["color"]
-            shapes_for_table.append({"name": f"#{i+1}", "area": round(area_m2, 2)})
-            with res_cols[i]:
+            total_m2 = sum(polygon_area_px2(s["points"]) * m2_per_px2_display for s in st.session_state["finished_shapes"])
+            for i, shape in enumerate(st.session_state["finished_shapes"]):
+                area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
+                b, g, r = shape["color"]
+                shapes_for_table.append({"name": f"#{i+1}", "area": round(area_m2, 2)})
                 st.markdown(
-                    f"<div style='text-align:center;padding:4px;border-radius:6px;background:rgba({r},{g},{b},0.12);border:1px solid rgb({r},{g},{b})'>"
-                    f"<b style='color:rgb({r},{g},{b})'>#{i+1}</b><br>{area_m2:.2f} m²</div>",
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;"
+                    f"padding:8px 12px;margin-bottom:6px;border-radius:6px;"
+                    f"background:rgba({r},{g},{b},0.10);border-left:4px solid rgb({r},{g},{b})'>"
+                    f"<b style='color:rgb({r},{g},{b})'>#{i+1}</b>"
+                    f"<span>{area_m2:.2f} m²　<span style='color:#888;font-size:.85em'>"
+                    f"({area_m2/PING_PER_M2:.2f} 坪)</span></span></div>",
                     unsafe_allow_html=True,
                 )
-        with res_cols[-1]:
+            st.divider()
             st.markdown(
-                f"<div style='text-align:center;padding:4px;border-radius:6px;background:#f0f4ff;border:1px solid #1a3f6f'>"
-                f"<b>總計</b><br>{total_m2:.2f} m²</div>",
+                f"<div style='display:flex;justify-content:space-between;padding:8px 12px;"
+                f"border-radius:6px;background:#f0f4ff;border:1px solid #1a3f6f'>"
+                f"<b>總計</b><b>{total_m2:.2f} m²（約 {total_m2/PING_PER_M2:.2f} 坪）</b></div>",
                 unsafe_allow_html=True,
             )
-        st.caption(f"約 {total_m2/PING_PER_M2:.2f} 坪" + ("　（僅顯示前 8 筆卡片，清單已全數計入總計）" if len(st.session_state["finished_shapes"]) > 8 else ""))
-    else:
-        st.caption("尚未框選任何空間，請展開上方「框選工具」開始框選。")
+        else:
+            st.caption("尚未框選任何空間，請在左邊圖面上開始框選。")
 else:
     st.info("請先上傳一份平面圖（PDF 或圖片）開始。")
-
-# ─────────────────────────────────────────────
-# 空調負載及選機
-# ─────────────────────────────────────────────
-st.divider()
-st.markdown("#### ❄️ 空調負載及選機")
-
-indoor_models, equip_lookup = load_equipment_data()
-if not indoor_models:
-    st.caption("⚠️ 尚未連上設備資料表（Google Sheets），室內機下拉選單目前是空的。"
-               "需要在 Streamlit Cloud 的 Secrets 加入 `gcp_service_account` 服務帳號設定才能抓到真實機型清單。")
 
 # ─────────────────────────────────────────────
 # 空調負載及選機
