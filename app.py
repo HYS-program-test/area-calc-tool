@@ -298,6 +298,8 @@ if uploaded:
 
     disp_img, display_scale = resize_display_cached(img_cropped, f"{file_key}_{working_width}", working_width)
     disp_arr_base = np.array(disp_img)
+    st.caption(f"📏 目前工作圖實際像素尺寸：{disp_img.width} × {disp_img.height} px"
+               "（畫面上的框會撐滿版面顯示，所以看起來大小差不多是正常的，這裡的數字才是真的尺寸）")
 
     with st.expander("🖊️ 框選工具", expanded=True):
         # ── 緊湊工具列 ──────────────────────────
