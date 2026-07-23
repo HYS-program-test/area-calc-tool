@@ -6,6 +6,7 @@ from PIL import Image
 import fitz  # PyMuPDF
 from streamlit_image_coordinates import streamlit_image_coordinates
 import re
+import json
 import io
 import base64
 import anthropic
@@ -190,6 +191,48 @@ def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndar
             cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
     return arr
 
+def ask_claude_detect_rooms(disp_img: Image.Image):
+    """請 Claude 直接用視覺理解去判斷平面圖上每個獨立房間的邊界，
+    回傳每個房間的頂點座標（用 0~1 的相對比例，不用絕對像素——
+    這對視覺模型來說通常估得比絕對像素座標準，我們自己再換算回實際像素）。
+    這是「語意判斷」出的草稿，精確度不會是像素級的，仍需要人工用框選工具核對調整。"""
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None, "⚠️ 尚未設定 ANTHROPIC_API_KEY"
+
+    buf = io.BytesIO()
+    disp_img.save(buf, format="PNG")
+    b64_img = base64.b64encode(buf.getvalue()).decode()
+
+    prompt = """這是一張建築平面圖。請你判斷圖中每一個獨立的房間／空間（忽略樓梯間、電梯核心、
+純走道這類開放式流通空間，只框出有明確機能的獨立房間，例如臥室、衛浴、廚房、客廳、儲藏室等）。
+
+對每個房間，估計它邊界的角點座標。座標請用「相對比例」表示：
+左上角是 (0, 0)，右下角是 (1, 1)，例如某個角點在圖面寬度 30%、高度 45% 的位置，就寫 [0.3, 0.45]。
+矩形房間給 4 個角點，不規則（L型等）房間可以給更多角點，依實際牆角描繪。
+
+只回傳 JSON，不要有其他文字，格式如下：
+[
+  {"name": "房間名稱（看得出來就填，看不出來就填空字串）", "points": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]},
+  ...
+]"""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=2048,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64_img}},
+                {"type": "text", "text": prompt},
+            ]}],
+        )
+        raw_text = response.content[0].text.strip()
+        raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
+        rooms = json.loads(raw_text)
+        return rooms, None
+    except Exception as e:
+        return None, f"⚠️ 呼叫 Claude 發生錯誤：{e}"
+
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
@@ -284,6 +327,35 @@ if uploaded:
 
         if not is_pdf:
             st.caption("⚠️ 圖片檔沒有內建解析度資訊，面積換算準確度會比 PDF 差。")
+
+        ai_col1, ai_col2 = st.columns([1.3, 4])
+        with ai_col1:
+            ai_detect_clicked = st.button("🤖 Claude 自動框選（草稿）", use_container_width=True,
+                                           help="請 Claude 用視覺判斷直接框出房間邊界，當作草稿，仍建議人工核對調整")
+        with ai_col2:
+            st.caption("Claude 判斷出的邊界是語意層級的估計，不是像素級精準測量，框好後請切到「矩形／多邊形」模式手動微調。")
+
+        if ai_detect_clicked:
+            with st.spinner("Claude 正在判讀平面圖，框出房間邊界中…"):
+                rooms, err = ask_claude_detect_rooms(disp_img)
+            if err:
+                st.error(err)
+            elif not rooms:
+                st.warning("Claude 沒有辨識出任何房間，請改用手動框選。")
+            else:
+                w, h = disp_img.width, disp_img.height
+                new_shapes = []
+                for i, room in enumerate(rooms):
+                    pts = room.get("points", [])
+                    if len(pts) < 3:
+                        continue
+                    abs_pts = [(px * w, py * h) for px, py in pts]
+                    color = hex_to_bgr(FIXED_COLORS[i % len(FIXED_COLORS)])
+                    new_shapes.append({"points": abs_pts, "color": color})
+                st.session_state["finished_shapes"] = new_shapes
+                st.session_state["current_points"] = []
+                st.success(f"Claude 框出了 {len(new_shapes)} 個房間草稿，請往下核對、用框選工具調整。")
+                st.rerun()
 
         m_per_px_at_render = (2.54 / RENDER_DPI / 100) * scale_ratio if is_pdf else None
         if m_per_px_at_render:
