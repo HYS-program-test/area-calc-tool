@@ -3,34 +3,26 @@ import numpy as np
 import cv2
 from PIL import Image
 import fitz  # PyMuPDF
-from streamlit_image_coordinates import streamlit_image_coordinates
+import streamlit.components.v1 as components
+from streamlit_javascript import st_javascript
 import re
 import io
 import base64
+import json
 import anthropic
 
 st.set_page_config(page_title="平面圖面積計算工具", page_icon="📐", layout="wide")
 
-# ─────────────────────────────────────────────
-# 常數
-# ─────────────────────────────────────────────
 RENDER_DPI = 144
 MAX_CANVAS_WIDTH = 1150
 PING_PER_M2 = 3.3058
-DEFAULT_COLOR = "#FF6347"
 CROP_PADDING = 25
 
 # ─────────────────────────────────────────────
 # Session State
 # ─────────────────────────────────────────────
 def init_session():
-    defaults = {
-        "last_file_key": None,
-        "current_points": [],
-        "finished_shapes": [],   # [{"points":[(x,y),...], "color":(b,g,r)}]
-        "last_click_xy": None,
-        "claude_review": None,
-    }
+    defaults = {"last_file_key": None, "finished_shapes": [], "claude_review": None}
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -38,18 +30,11 @@ def init_session():
 init_session()
 
 def reset_drawing_state():
-    st.session_state["current_points"] = []
     st.session_state["finished_shapes"] = []
-    st.session_state["last_click_xy"] = None
     st.session_state["claude_review"] = None
 
-def hex_to_bgr(hex_color: str):
-    hex_color = hex_color.lstrip("#")
-    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-    return (b, g, r)
-
 # ─────────────────────────────────────────────
-# 圖片載入 / 裁切 / 縮放（皆快取，避免每次互動都重新運算）
+# 圖片載入 / 裁切 / 縮放（快取）
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_pdf_cached(pdf_bytes: bytes):
@@ -76,8 +61,6 @@ def load_image_cached(file_bytes: bytes):
 
 @st.cache_data(show_spinner=False)
 def crop_to_content_cached(_img: Image.Image, file_key: str):
-    """自動裁切掉圖面四周空白／外框，用「墨跡密度」找出真正的建築本體
-    （排除滿版圖框線這種 bbox 很大但密度很低的東西），置中放大顯示。"""
     gray = cv2.cvtColor(np.array(_img), cv2.COLOR_RGB2GRAY)
     _, ink = cv2.threshold(gray, 245, 255, cv2.THRESH_BINARY_INV)
     ink_d = cv2.dilate(ink, np.ones((5, 5), np.uint8), iterations=2)
@@ -90,11 +73,9 @@ def crop_to_content_cached(_img: Image.Image, file_key: str):
         bbox_area = w * h
         if bbox_area == 0:
             continue
-        density = area / bbox_area
-        score = density * area
+        score = (area / bbox_area) * area
         if score > best_score:
-            best_score = score
-            best_idx = idx
+            best_score, best_idx = score, idx
     if best_idx is None:
         return _img
     x, y, w, h, _ = stats[best_idx]
@@ -116,33 +97,6 @@ def polygon_area_px2(pts):
         x2, y2 = pts[(j + 1) % n]
         area += x1 * y2 - x2 * y1
     return abs(area) / 2
-
-def draw_all(base_arr: np.ndarray, draw_mode: str, current_color_bgr) -> np.ndarray:
-    arr = base_arr.copy()
-    for i, shape in enumerate(st.session_state["finished_shapes"]):
-        color = shape["color"]
-        pts_np = np.array(shape["points"], dtype=np.int32)
-        cv2.polylines(arr, [pts_np], True, color, 3)
-        cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
-        label = f"#{i+1}"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(arr, (cx - tw//2 - 5, cy - th - 6), (cx + tw//2 + 5, cy + 6), (255, 255, 255), -1)
-        cv2.rectangle(arr, (cx - tw//2 - 5, cy - th - 6), (cx + tw//2 + 5, cy + 6), color, 2)
-        cv2.putText(arr, label, (cx - tw//2, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-    cur = st.session_state["current_points"]
-    if cur:
-        for p in cur:
-            cv2.circle(arr, (int(p[0]), int(p[1])), 6, current_color_bgr, -1)
-            cv2.circle(arr, (int(p[0]), int(p[1])), 6, (255, 255, 255), 2)
-        if draw_mode == "多邊形" and len(cur) > 1:
-            pts_np = np.array(cur, dtype=np.int32)
-            cv2.polylines(arr, [pts_np], False, current_color_bgr, 2)
-        elif draw_mode == "矩形" and len(cur) == 1:
-            x, y = int(cur[0][0]), int(cur[0][1])
-            cv2.line(arr, (x, 0), (x, arr.shape[0]), current_color_bgr, 1)
-            cv2.line(arr, (0, y), (arr.shape[1], y), current_color_bgr, 1)
-    return arr
 
 def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
@@ -174,13 +128,235 @@ def ask_claude_review(overlay_img: np.ndarray, results: list) -> str:
         return f"⚠️ 呼叫 Claude 發生錯誤：{e}"
 
 # ─────────────────────────────────────────────
-# 版面：精簡標題列
+# Fabric.js 畫布：所有互動（畫矩形/多邊形、選取、拖曳、拉伸、改色、刪除）
+# 全部在畫布內部用自己的工具列處理，完全不觸發 Streamlit 重新整理，
+# 只有資料寫進 localStorage，等使用者按下方「計算面積」才讀取一次。
+# ─────────────────────────────────────────────
+CANVAS_HTML = """
+<style>
+  .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:8px;
+             background:#f7f9fc; border:1px solid #e1e8f0; border-radius:8px 8px 0 0; font-family:sans-serif; }
+  .toolbar button { padding:6px 12px; border-radius:6px; border:1px solid #ccd6e4; background:#fff;
+                     cursor:pointer; font-size:13px; }
+  .toolbar button.active { background:#1a3f6f; color:#fff; border-color:#1a3f6f; }
+  .toolbar button:hover { filter:brightness(0.97); }
+  .toolbar input[type=color] { width:34px; height:30px; border:1px solid #ccd6e4; border-radius:6px; cursor:pointer; }
+  .toolbar .sep { width:1px; height:22px; background:#ddd; margin:0 4px; }
+  .canvas-wrap { border:1px solid #e1e8f0; border-top:none; border-radius:0 0 8px 8px; overflow:auto; max-height:760px; }
+</style>
+<div class="toolbar">
+  <button id="btn-rect" class="active">▭ 矩形</button>
+  <button id="btn-poly">⬠ 多邊形</button>
+  <button id="btn-select">↖ 選取／調整</button>
+  <div class="sep"></div>
+  <input type="color" id="color-picker" value="#FF6347">
+  <button id="btn-recolor">套用顏色到選取</button>
+  <div class="sep"></div>
+  <button id="btn-delete">🗑 刪除選取</button>
+  <button id="btn-clear">清空全部</button>
+</div>
+<div class="canvas-wrap"><canvas id="fabric-canvas"></canvas></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+<script>
+(function() {
+  const bgDataUrl = "__BG_DATA_URL__";
+  const initialShapes = __INITIAL_SHAPES__;
+
+  const canvas = new fabric.Canvas('fabric-canvas', {selection: true});
+  let mode = 'rect';
+  let color = '#FF6347';
+
+  function hexToRgba(hex, alpha) {
+    const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+
+  fabric.Image.fromURL(bgDataUrl, function(img) {
+    canvas.setWidth(img.width);
+    canvas.setHeight(img.height);
+    canvas.setBackgroundImage(img, canvas.renderAll.bind(canvas));
+    initialShapes.forEach(s => addShapeFromPoints(s.points, s.color, s.type || 'polygon'));
+    canvas.renderAll();
+    saveState();
+  });
+
+  function addShapeFromPoints(points, shapeColor, shapeType) {
+    let obj;
+    if (shapeType === 'rect') {
+      const xs = points.map(p=>p[0]), ys = points.map(p=>p[1]);
+      obj = new fabric.Rect({
+        left: Math.min(...xs), top: Math.min(...ys),
+        width: Math.max(...xs)-Math.min(...xs), height: Math.max(...ys)-Math.min(...ys),
+        fill: hexToRgba(shapeColor, 0.25), stroke: shapeColor, strokeWidth: 3,
+        transparentCorners: false, cornerColor: shapeColor, cornerSize: 9,
+      });
+    } else {
+      obj = new fabric.Polygon(points.map(p=>({x:p[0], y:p[1]})), {
+        fill: hexToRgba(shapeColor, 0.25), stroke: shapeColor, strokeWidth: 3,
+        transparentCorners: false, cornerColor: shapeColor, cornerSize: 9, objectCaching: false,
+      });
+    }
+    canvas.add(obj);
+    return obj;
+  }
+
+  function setMode(newMode) {
+    mode = newMode;
+    canvas.selection = (mode === 'select');
+    canvas.forEachObject(o => { o.selectable = (mode === 'select'); o.evented = (mode === 'select'); });
+    canvas.discardActiveObject();
+    document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
+    if (mode === 'rect') document.getElementById('btn-rect').classList.add('active');
+    if (mode === 'polygon') document.getElementById('btn-poly').classList.add('active');
+    if (mode === 'select') document.getElementById('btn-select').classList.add('active');
+    canvas.renderAll();
+  }
+
+  document.getElementById('btn-rect').onclick = () => setMode('rect');
+  document.getElementById('btn-poly').onclick = () => setMode('polygon');
+  document.getElementById('btn-select').onclick = () => setMode('select');
+  document.getElementById('color-picker').oninput = (e) => { color = e.target.value; };
+  document.getElementById('btn-recolor').onclick = () => {
+    const active = canvas.getActiveObject();
+    if (active) {
+      active.set({stroke: color, fill: hexToRgba(color, 0.25)});
+      canvas.renderAll();
+      saveState();
+    }
+  };
+  document.getElementById('btn-delete').onclick = () => {
+    const active = canvas.getActiveObject();
+    if (active) { canvas.remove(active); saveState(); }
+  };
+  document.getElementById('btn-clear').onclick = () => {
+    canvas.getObjects().slice().forEach(o => canvas.remove(o));
+    saveState();
+  };
+
+  let isDrawingRect = false, rectStart = null, activeRect = null;
+  let polyPoints = [], polyMarkers = [], polyLine = null;
+
+  canvas.on('mouse:down', function(o) {
+    if (mode === 'rect') {
+      isDrawingRect = true;
+      const p = canvas.getPointer(o.e);
+      rectStart = {x: p.x, y: p.y};
+      activeRect = new fabric.Rect({
+        left: p.x, top: p.y, width: 0, height: 0,
+        fill: hexToRgba(color, 0.25), stroke: color, strokeWidth: 3, selectable: false, evented: false,
+      });
+      canvas.add(activeRect);
+    } else if (mode === 'polygon') {
+      const p = canvas.getPointer(o.e);
+      if (polyPoints.length > 2) {
+        const dx = p.x - polyPoints[0].x, dy = p.y - polyPoints[0].y;
+        if (Math.sqrt(dx*dx + dy*dy) < 16) { finishPolygon(); return; }
+      }
+      polyPoints.push({x: p.x, y: p.y});
+      const marker = new fabric.Circle({left:p.x-5, top:p.y-5, radius:5, fill:color, selectable:false, evented:false});
+      canvas.add(marker); polyMarkers.push(marker);
+      updatePolyLine();
+    }
+  });
+
+  canvas.on('mouse:move', function(o) {
+    if (!isDrawingRect || !activeRect) return;
+    const p = canvas.getPointer(o.e);
+    activeRect.set({
+      left: Math.min(p.x, rectStart.x), top: Math.min(p.y, rectStart.y),
+      width: Math.abs(p.x - rectStart.x), height: Math.abs(p.y - rectStart.y),
+    });
+    canvas.requestRenderAll();
+  });
+
+  canvas.on('mouse:up', function() {
+    if (isDrawingRect) {
+      isDrawingRect = false;
+      if (activeRect && (activeRect.width < 5 || activeRect.height < 5)) {
+        canvas.remove(activeRect);
+      } else if (activeRect) {
+        activeRect.set({selectable: (mode==='select'), evented: (mode==='select')});
+        saveState();
+      }
+      activeRect = null;
+    }
+  });
+
+  function updatePolyLine() {
+    if (polyLine) canvas.remove(polyLine);
+    if (polyPoints.length > 1) {
+      polyLine = new fabric.Polyline(polyPoints, {fill:'', stroke:color, strokeWidth:2, selectable:false, evented:false});
+      canvas.add(polyLine);
+    }
+    canvas.renderAll();
+  }
+
+  function finishPolygon() {
+    polyMarkers.forEach(m => canvas.remove(m));
+    if (polyLine) canvas.remove(polyLine);
+    if (polyPoints.length >= 3) {
+      const poly = new fabric.Polygon(polyPoints, {
+        fill: hexToRgba(color, 0.25), stroke: color, strokeWidth: 3,
+        transparentCorners: false, cornerColor: color, cornerSize: 9, objectCaching: false,
+        selectable: (mode==='select'), evented: (mode==='select'),
+      });
+      canvas.add(poly);
+      saveState();
+    }
+    polyPoints = []; polyMarkers = []; polyLine = null;
+  }
+
+  document.addEventListener('keydown', function(e) {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && mode === 'select') {
+      const active = canvas.getActiveObject();
+      if (active) { canvas.remove(active); saveState(); }
+    }
+  });
+
+  canvas.on('object:modified', saveState);
+
+  function saveState() {
+    const shapes = canvas.getObjects().filter(o => o.type === 'rect' || o.type === 'polygon').map(o => {
+      const matrix = o.calcTransformMatrix();
+      let pts;
+      if (o.type === 'rect') {
+        const w = o.width * o.scaleX, h = o.height * o.scaleY;
+        pts = [{x:-w/2,y:-h/2},{x:w/2,y:-h/2},{x:w/2,y:h/2},{x:-w/2,y:h/2}].map(c => {
+          const t = fabric.util.transformPoint(c, matrix); return [t.x, t.y];
+        });
+      } else {
+        pts = o.points.map(p => {
+          const t = fabric.util.transformPoint({x:p.x-o.pathOffset.x, y:p.y-o.pathOffset.y}, matrix);
+          return [t.x, t.y];
+        });
+      }
+      return {points: pts, color: o.stroke, type: o.type};
+    });
+    window.localStorage.setItem('area_calc_shapes_v2', JSON.stringify(shapes));
+  }
+
+  setMode('rect');
+})();
+</script>
+"""
+
+def render_canvas(bg_img: Image.Image, shapes: list, height: int):
+    buf = io.BytesIO()
+    bg_img.save(buf, format="JPEG", quality=85)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    html = CANVAS_HTML.replace("__BG_DATA_URL__", f"data:image/jpeg;base64,{b64}")
+    html = html.replace("__INITIAL_SHAPES__", json.dumps(shapes))
+    components.html(html, height=height + 70, scrolling=True)
+
+# ─────────────────────────────────────────────
+# 主流程
 # ─────────────────────────────────────────────
 title_col, upload_col = st.columns([1.2, 2.5])
 with title_col:
     st.markdown("##### 📐 平面圖面積計算工具")
 with upload_col:
-    uploaded = st.file_uploader("上傳平面圖（PDF 或圖片）", type=["pdf", "png", "jpg", "jpeg"], label_visibility="collapsed")
+    uploaded = st.file_uploader("上傳平面圖", type=["pdf", "png", "jpg", "jpeg"], label_visibility="collapsed")
 
 if uploaded:
     file_key = f"{uploaded.name}_{uploaded.size}"
@@ -199,38 +375,21 @@ if uploaded:
 
     img_cropped = crop_to_content_cached(img, file_key)
     disp_img, display_scale = resize_display_cached(img_cropped, file_key, MAX_CANVAS_WIDTH)
-    disp_arr_base = np.array(disp_img)
 
-    # ── 緊湊工具列：比例尺、模式、顏色、動作按鈕全部在同一排 ──────────────
-    t1, t2, t3, t4, t5, t6 = st.columns([1.3, 1.6, 2, 1, 1.1, 1.1])
-    with t1:
+    sc1, sc2, sc3 = st.columns([1.3, 1, 1])
+    with sc1:
         scale_ratio = st.number_input(
-            f"比例尺 1:N｜{'✅自動' if auto_scale else '⚠️手動'}",
+            f"比例尺 1:N｜{'✅自動偵測' if auto_scale else '⚠️請手動輸入'}",
             min_value=1, value=auto_scale or 100, step=10,
         )
-    with t2:
-        shape_color_hex = st.color_picker("邊框顏色", DEFAULT_COLOR)
-    with t3:
-        draw_mode = st.radio("模式", ["矩形", "多邊形"], horizontal=True, label_visibility="visible",
-                              help="矩形：點第一角、再點對角自動完成。多邊形：依序點角點，點回起點附近自動封閉。")
-    with t4:
+    with sc2:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button("↩️ 復原", use_container_width=True,
-                      disabled=len(st.session_state["current_points"]) == 0):
-            st.session_state["current_points"].pop()
-            st.rerun()
-    with t5:
+        calc_clicked = st.button("📐 計算面積", type="primary", use_container_width=True,
+                                  help="把畫布上目前的框選結果讀進來計算面積")
+    with sc3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button("🗑️ 清空", use_container_width=True):
+        if st.button("🗑️ 清空全部重來", use_container_width=True):
             reset_drawing_state()
-            st.rerun()
-    with t6:
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        del_last = st.button("🗑️ 刪末框", use_container_width=True,
-                              disabled=len(st.session_state["finished_shapes"]) == 0,
-                              help="刪除最後一個已完成的框")
-        if del_last:
-            st.session_state["finished_shapes"].pop()
             st.rerun()
 
     if not is_pdf:
@@ -242,66 +401,38 @@ if uploaded:
     else:
         m_per_px_display = (2.54 / 96 / 100) * scale_ratio / display_scale
     m2_per_px2_display = m_per_px_display ** 2
-    current_color_bgr = hex_to_bgr(shape_color_hex)
 
-    # ── 圖面：主要區域，撐滿可用寬度顯示（不留右側空白）──────────────────────
-    working_arr = draw_all(disp_arr_base, draw_mode, current_color_bgr)
-    click = streamlit_image_coordinates(
-        working_arr, key=f"clicker_{draw_mode}_{file_key}",
-        click_and_drag=False, image_format="JPEG",
-        use_column_width="always",
-    )
+    st.caption("畫布左上角是自己的工具列：矩形／多邊形／選取（拖曳移動、拉角縮放、Delete鍵刪除）／改色／清空，都在畫布內操作，不會整頁重新整理。畫完按上面「📐 計算面積」才會把結果算出來。")
+    render_canvas(disp_img, st.session_state["finished_shapes"], disp_img.height)
 
-    if click is not None and "x" in click:
-        # 圖片撐滿寬度顯示時，點擊回傳的是「顯示尺寸」座標，要換算回「圖片原始像素」座標，
-        # 否則面積計算會用錯比例尺
-        disp_w = click.get("width") or disp_img.width
-        disp_h = click.get("height") or disp_img.height
-        scale_x = disp_img.width / disp_w if disp_w else 1
-        scale_y = disp_img.height / disp_h if disp_h else 1
-        real_x = click["x"] * scale_x
-        real_y = click["y"] * scale_y
+    if calc_clicked:
+        raw = st_javascript("await new Promise(r => r(window.localStorage.getItem('area_calc_shapes_v2')));")
+        if raw and raw != 0:
+            try:
+                st.session_state["finished_shapes"] = json.loads(raw)
+            except Exception:
+                st.warning("讀取失敗，請再按一次「計算面積」")
+        st.rerun()
 
-        xy = (real_x, real_y)
-        if xy != st.session_state["last_click_xy"]:
-            st.session_state["last_click_xy"] = xy
-            st.session_state["current_points"].append(xy)
-
-            if draw_mode == "矩形" and len(st.session_state["current_points"]) == 2:
-                (x1, y1), (x2, y2) = st.session_state["current_points"]
-                if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
-                    rect_pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-                    st.session_state["finished_shapes"].append({"points": rect_pts, "color": current_color_bgr})
-                st.session_state["current_points"] = []
-            elif draw_mode == "多邊形" and len(st.session_state["current_points"]) > 2:
-                x0, y0 = st.session_state["current_points"][0]
-                if ((xy[0]-x0)**2 + (xy[1]-y0)**2) ** 0.5 < 14:
-                    poly_pts = st.session_state["current_points"][:-1]
-                    st.session_state["finished_shapes"].append({"points": poly_pts, "color": current_color_bgr})
-                    st.session_state["current_points"] = []
-
-            st.rerun()
-
-    # ── 結果列：緊湊橫向卡片，不佔大版面 ──────────────────────────
+    # ── 結果 ──────────────────────────
     if st.session_state["finished_shapes"]:
         total_m2 = sum(polygon_area_px2(s["points"]) * m2_per_px2_display for s in st.session_state["finished_shapes"])
         res_cols = st.columns(min(len(st.session_state["finished_shapes"]), 8) + 1)
         for i, shape in enumerate(st.session_state["finished_shapes"][:8]):
             area_m2 = polygon_area_px2(shape["points"]) * m2_per_px2_display
-            b, g, r = shape["color"]
+            color = shape["color"]
             with res_cols[i]:
                 st.markdown(
-                    f"<div style='text-align:center;padding:4px;border-radius:6px;background:rgba({r},{g},{b},0.12);border:1px solid rgb({r},{g},{b})'>"
-                    f"<b style='color:rgb({r},{g},{b})'>#{i+1}</b><br>{area_m2:.2f} m²</div>",
+                    f"<div style='text-align:center;padding:4px;border-radius:6px;background:{color}22;border:1px solid {color}'>"
+                    f"<b style='color:{color}'>#{i+1}</b><br>{area_m2:.2f} m²</div>",
                     unsafe_allow_html=True,
                 )
         with res_cols[-1]:
             st.markdown(
                 f"<div style='text-align:center;padding:4px;border-radius:6px;background:#f0f4ff;border:1px solid #1a3f6f'>"
-                f"<b>總計</b><br>{total_m2:.2f} m²</div>",
-                unsafe_allow_html=True,
+                f"<b>總計</b><br>{total_m2:.2f} m²</div>", unsafe_allow_html=True,
             )
-        st.caption(f"約 {total_m2/PING_PER_M2:.2f} 坪" + ("　（僅顯示前 8 筆卡片，清單已全數計入總計）" if len(st.session_state["finished_shapes"]) > 8 else ""))
+        st.caption(f"約 {total_m2/PING_PER_M2:.2f} 坪")
 
         with st.expander("🤖 Claude 輔助核對（對照原圖標註每個框對應的空間，僅供參考）"):
             results = [
@@ -309,12 +440,20 @@ if uploaded:
                 for i, s in enumerate(st.session_state["finished_shapes"])
             ]
             if st.button("請 Claude 協助核對"):
+                overlay = np.array(disp_img).copy()
+                for i, shape in enumerate(st.session_state["finished_shapes"]):
+                    pts_np = np.array(shape["points"], dtype=np.int32)
+                    hexc = shape["color"].lstrip("#")
+                    r, g, b = int(hexc[0:2],16), int(hexc[2:4],16), int(hexc[4:6],16)
+                    cv2.polylines(overlay, [pts_np], True, (r, g, b), 3)
+                    cx, cy = int(np.mean(pts_np[:, 0])), int(np.mean(pts_np[:, 1]))
+                    cv2.putText(overlay, f"#{i+1}", (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 0, 0), 2)
                 with st.spinner("Claude 正在對照圖面檢查中…"):
-                    review_text = ask_claude_review(working_arr, results)
+                    review_text = ask_claude_review(overlay, results)
                 st.session_state["claude_review"] = review_text
             if st.session_state.get("claude_review"):
                 st.info(st.session_state["claude_review"])
     else:
-        st.caption("尚未框選任何空間，請直接在上方圖面點擊開始框選。")
+        st.caption("尚未框選任何空間，請在上方畫布開始框選，完成後按「計算面積」。")
 else:
     st.info("請先上傳一份平面圖（PDF 或圖片）開始。")
