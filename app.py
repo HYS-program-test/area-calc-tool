@@ -54,9 +54,15 @@ def hex_to_bgr(hex_color: str):
 # ─────────────────────────────────────────────
 # 設備資料表（連結 Google Sheets「Total Certificate Management」）
 # 沒設定 secrets 時優雅地回傳空清單，不會讓程式壞掉，只是下拉選單先是空的
+# 欄位對照：B=類型、C=室外機、D 或 AJ=室內機、Q=室內機冷房能力
 # ─────────────────────────────────────────────
+def _col(row, idx):
+    return row[idx].strip() if len(row) > idx and row[idx] else ""
+
 @st.cache_data(show_spinner=False, ttl=300)
-def load_equipment_models():
+def load_equipment_data():
+    """回傳 (室內機清單, 室內機->資料 查找表)。查找表的 value 是
+    {"類型":..., "室外機":..., "室內機冷房能力":...}，用室內機型號查其他欄位。"""
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -70,10 +76,23 @@ def load_equipment_models():
         sh = gc.open_by_key(sheet_id)
         ws = sh.get_worksheet(0)
         values = ws.get_all_values()
-        # 型號欄位位置依實際表格結構可能要調整，這裡先抓 AH 欄（室外機型號，冷氣能效分級用）
-        col_idx = 33  # AH欄，0-indexed
-        models = sorted({row[col_idx] for row in values[2:] if len(row) > col_idx and row[col_idx].strip()})
-        return models
+
+        IDX_TYPE, IDX_OUTDOOR, IDX_INDOOR_D, IDX_INDOOR_AJ, IDX_CAPACITY = 1, 2, 3, 35, 16
+
+        lookup = {}
+        for row in values[2:]:
+            indoor = _col(row, IDX_INDOOR_D) or _col(row, IDX_INDOOR_AJ)
+            if not indoor:
+                continue
+            lookup[indoor] = {
+                "類型": _col(row, IDX_TYPE),
+                "室外機": _col(row, IDX_OUTDOOR),
+                "室內機冷房能力": _col(row, IDX_CAPACITY),
+            }
+        return sorted(lookup.keys()), lookup
+    except Exception:
+        return [], {}
+
     except Exception:
         return []
 
@@ -355,44 +374,79 @@ else:
 st.divider()
 st.markdown("#### ❄️ 空調負載及選機")
 
-equipment_models = load_equipment_models()
-if not equipment_models:
-    st.caption("⚠️ 尚未連上設備資料表（Google Sheets），室內機／室外機下拉選單目前是空的。"
+indoor_models, equip_lookup = load_equipment_data()
+if not indoor_models:
+    st.caption("⚠️ 尚未連上設備資料表（Google Sheets），室內機下拉選單目前是空的。"
                "需要在 Streamlit Cloud 的 Secrets 加入 `gcp_service_account` 服務帳號設定才能抓到真實機型清單。")
 
-# 用目前框選到的空間，預先帶入表格；使用者仍可自行修改／新增／刪除列
+# 用目前框選到的空間，依「編號」帶入表格；空間名稱可自由改，不會因為重新框選就被蓋掉
 if shapes_for_table:
-    existing = {row["空間名稱"]: row for row in (st.session_state["equip_table"] or [])}
+    existing = {row.get("編號"): row for row in (st.session_state["equip_table"] or [])}
     rows = []
     for s in shapes_for_table:
         prev = existing.get(s["name"], {})
         rows.append({
-            "空間名稱": s["name"],
+            "編號": s["name"],
+            "空間名稱": prev.get("空間名稱", ""),
             "面積(m²)": s["area"],
             "每坪建議負荷值": prev.get("每坪建議負荷值", 800),
-            "設備類別": prev.get("設備類別", "RA"),
             "室內機": prev.get("室內機", ""),
-            "室外機": prev.get("室外機", ""),
         })
     st.session_state["equip_table"] = rows
 
 df_source = st.session_state["equip_table"] or [
-    {"空間名稱": "", "面積(m²)": 0.0, "每坪建議負荷值": 800, "設備類別": "RA", "室內機": "", "室外機": ""}
+    {"編號": "#1", "空間名稱": "", "面積(m²)": 0.0, "每坪建議負荷值": 800, "室內機": ""}
 ]
-df = pd.DataFrame(df_source)
+
+# 依「室內機」查找對應的類型／室內機冷房能力／室外機，並計算需求冷房能力
+computed_rows = []
+for row in df_source:
+    area = row.get("面積(m²)", 0) or 0
+    load = row.get("每坪建議負荷值", 800) or 800
+    demand = round(area / 3.3 * load) if area else 0
+    indoor = row.get("室內機", "")
+    info = equip_lookup.get(indoor, {})
+    equip_type = info.get("類型", "")
+    computed_rows.append({
+        "編號": row.get("編號", ""),
+        "空間名稱": row.get("空間名稱", ""),
+        "面積(m²)": area,
+        "每坪建議負荷值": load,
+        "需求冷房能力": demand,
+        "室內機": indoor,
+        "類型": equip_type,
+        "室內機冷房能力": info.get("室內機冷房能力", ""),
+        "室外機": info.get("室外機", ""),
+        "連結率": row.get("連結率", "") if "VRV" in equip_type.upper() else "",
+    })
+
+df = pd.DataFrame(computed_rows)
 
 edited_df = st.data_editor(
     df,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "空間名稱": st.column_config.TextColumn("空間名稱", required=True),
+        "編號": st.column_config.TextColumn("編號", disabled=True),
+        "空間名稱": st.column_config.TextColumn("空間名稱"),
         "面積(m²)": st.column_config.NumberColumn("面積(m²)", min_value=0.0, step=0.1, format="%.2f"),
         "每坪建議負荷值": st.column_config.SelectboxColumn("每坪建議負荷值", options=LOAD_OPTIONS, required=True),
-        "設備類別": st.column_config.SelectboxColumn("設備類別", options=DEVICE_CATEGORIES, required=True),
-        "室內機": st.column_config.SelectboxColumn("室內機", options=equipment_models or [""]),
-        "室外機": st.column_config.SelectboxColumn("室外機", options=equipment_models or [""]),
+        "需求冷房能力": st.column_config.NumberColumn("需求冷房能力", disabled=True,
+                                                     help="= 面積(m²) ÷ 3.3 × 每坪建議負荷值"),
+        "室內機": st.column_config.SelectboxColumn("室內機", options=indoor_models or [""]),
+        "類型": st.column_config.TextColumn("類型", disabled=True, help="依選定的室內機自動帶出"),
+        "室內機冷房能力": st.column_config.TextColumn("室內機冷房能力", disabled=True),
+        "室外機": st.column_config.TextColumn("室外機", disabled=True, help="依選定的室內機自動帶出"),
+        "連結率": st.column_config.TextColumn("連結率", help="僅 VRV 系列需要填寫"),
     },
     key="equip_data_editor",
 )
-st.session_state["equip_table"] = edited_df.to_dict("records")
+
+# 存回 session_state 時，只保留使用者可編輯的欄位（其餘欄位下次重繪時會重新計算/查找）
+st.session_state["equip_table"] = [
+    {
+        "編號": r["編號"], "空間名稱": r["空間名稱"], "面積(m²)": r["面積(m²)"],
+        "每坪建議負荷值": r["每坪建議負荷值"], "室內機": r["室內機"], "連結率": r["連結率"],
+    }
+    for r in edited_df.to_dict("records")
+]
