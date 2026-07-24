@@ -21,7 +21,7 @@ RENDER_DPI = 144
 PING_PER_M2 = 3.3058
 CROP_PADDING = 25
 FIXED_COLORS = ["#FF6347", "#3B82F6", "#22C55E", "#F59E0B", "#A855F7", "#06B6D4"]
-COLOR_LABELS = ["紅", "橘", "綠", "青綠", "藍", "紫"]  # 順序對應 gist_rainbow 演算法實際輸出的顏色，不是隨意排列
+COLOR_LABELS = ["1", "2", "3", "4", "5", "6"]  # 純編號；實際顏色仍依 ANNOTATION_REAL_COLORS 的順序正確對應，不受標籤文字影響
 
 # 直接呼叫套件本身的 get_colormap（不是自己重新兜一份），
 # 確保跟畫面上矩形工具實際顯示的顏色來源完全一致，不會有重新實作造成的落差。
@@ -291,7 +291,7 @@ if uploaded:
 
         if HAS_ANNOTATION_PKG:
             with st.expander("🖱️ 矩形工具（可直接拖曳、縮放調整）", expanded=True):
-                st.caption("畫矩形前先選顏色（下面的色塊清單，標籤文字已對應套件實際顯示的顏色），"
+                st.caption("畫矩形前先選一個編號（下面 1~6 對應 6 種顏色），"
                            "畫完可以直接拖曳邊角調整大小、選取後按 Delete 鍵刪除。確認後按「套用」才會"
                            "加進正式的面積結果清單；不規則（L型等）空間可以用多個矩形拼湊，再到右邊清單勾選合併。")
                 try:
