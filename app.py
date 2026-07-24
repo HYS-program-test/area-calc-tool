@@ -6,6 +6,7 @@ from PIL import Image
 import fitz  # PyMuPDF
 try:
     from streamlit_image_annotation import detection as st_detection
+    from streamlit_image_annotation.Detection import get_colormap as _sia_get_colormap
     HAS_ANNOTATION_PKG = True
 except Exception:
     HAS_ANNOTATION_PKG = False
@@ -22,19 +23,13 @@ CROP_PADDING = 25
 FIXED_COLORS = ["#FF6347", "#3B82F6", "#22C55E", "#F59E0B", "#A855F7", "#06B6D4"]
 COLOR_LABELS = ["🔴", "🔵", "🟢", "🟠", "🟣", "🔷"]
 
-def get_annotation_colormap(label_names, colormap_name="gist_rainbow"):
-    """跟 streamlit-image-annotation 套件內部完全相同的顏色演算法（gist_rainbow），
-    算出每個標籤實際會被畫成什麼顏色——套件本身不接受自訂顏色，只能反過來
-    用它的邏輯去算出「真正的顏色」，確保跟畫面上看到的一致，不會選藍色卻套用成黃色。"""
-    import matplotlib.pyplot as plt
-    colors = []
-    cmap = plt.get_cmap(colormap_name)
-    for idx in range(len(label_names)):
-        rgb = [int(d) for d in np.array(cmap(float(idx) / len(label_names))) * 255][:3]
-        colors.append("#%02x%02x%02x" % tuple(rgb))
-    return colors
-
-ANNOTATION_REAL_COLORS = get_annotation_colormap(COLOR_LABELS) if HAS_ANNOTATION_PKG else FIXED_COLORS
+# 直接呼叫套件本身的 get_colormap（不是自己重新兜一份），
+# 確保跟畫面上矩形工具實際顯示的顏色來源完全一致，不會有重新實作造成的落差。
+if HAS_ANNOTATION_PKG:
+    _colormap_dict = _sia_get_colormap(COLOR_LABELS, colormap_name="gist_rainbow")
+    ANNOTATION_REAL_COLORS = [_colormap_dict[label] for label in COLOR_LABELS]
+else:
+    ANNOTATION_REAL_COLORS = FIXED_COLORS
 LOAD_OPTIONS = list(range(400, 1300, 100))  # 400~1200，每100一個
 DEVICE_CATEGORIES = ["RA", "SA", "MA", "VRV"]
 
@@ -299,6 +294,13 @@ if uploaded:
                 st.caption("畫矩形前先選顏色（下面的色塊清單），畫完可以直接拖曳邊角調整大小、"
                            "選取後按 Delete 鍵刪除。確認後按「套用」才會加進正式的面積結果清單；"
                            "不規則（L型等）空間可以用多個矩形拼湊，再到右邊清單勾選合併。")
+                legend_html = "".join(
+                    f"<span style='display:inline-flex;align-items:center;margin-right:14px'>"
+                    f"<span style='width:14px;height:14px;border-radius:3px;background:{c};"
+                    f"display:inline-block;margin-right:4px'></span>{lbl} 實際顯示這個顏色</span>"
+                    for lbl, c in zip(COLOR_LABELS, ANNOTATION_REAL_COLORS)
+                )
+                st.markdown(f"<div style='margin-bottom:8px'>{legend_html}</div>", unsafe_allow_html=True)
                 try:
                     annot_result = st_detection(
                         disp_img, label_list=COLOR_LABELS,
