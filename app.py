@@ -21,6 +21,20 @@ PING_PER_M2 = 3.3058
 CROP_PADDING = 25
 FIXED_COLORS = ["#FF6347", "#3B82F6", "#22C55E", "#F59E0B", "#A855F7", "#06B6D4"]
 COLOR_LABELS = ["🔴", "🔵", "🟢", "🟠", "🟣", "🔷"]
+
+def get_annotation_colormap(label_names, colormap_name="gist_rainbow"):
+    """跟 streamlit-image-annotation 套件內部完全相同的顏色演算法（gist_rainbow），
+    算出每個標籤實際會被畫成什麼顏色——套件本身不接受自訂顏色，只能反過來
+    用它的邏輯去算出「真正的顏色」，確保跟畫面上看到的一致，不會選藍色卻套用成黃色。"""
+    import matplotlib.pyplot as plt
+    colors = []
+    cmap = plt.get_cmap(colormap_name)
+    for idx in range(len(label_names)):
+        rgb = [int(d) for d in np.array(cmap(float(idx) / len(label_names))) * 255][:3]
+        colors.append("#%02x%02x%02x" % tuple(rgb))
+    return colors
+
+ANNOTATION_REAL_COLORS = get_annotation_colormap(COLOR_LABELS) if HAS_ANNOTATION_PKG else FIXED_COLORS
 LOAD_OPTIONS = list(range(400, 1300, 100))  # 400~1200，每100一個
 DEVICE_CATEGORIES = ["RA", "SA", "MA", "VRV"]
 
@@ -34,6 +48,8 @@ def init_session():
         "claude_review": None,
         "equip_table": None,
         "group_counter": 0,
+        "annot_bboxes": [],
+        "annot_labels": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -44,6 +60,8 @@ init_session()
 def reset_drawing_state():
     st.session_state["finished_shapes"] = []
     st.session_state["claude_review"] = None
+    st.session_state["annot_bboxes"] = []
+    st.session_state["annot_labels"] = []
 
 def hex_to_bgr(hex_color: str):
     hex_color = hex_color.lstrip("#")
@@ -284,17 +302,24 @@ if uploaded:
                 try:
                     annot_result = st_detection(
                         disp_img, label_list=COLOR_LABELS,
-                        bboxes=[], labels=[],
+                        bboxes=st.session_state["annot_bboxes"],
+                        labels=st.session_state["annot_labels"],
                         height=disp_img.height, width=disp_img.width,
                         key=f"annot_{file_key}",
                     )
+                    if annot_result is not None:
+                        # 記住目前畫布上的狀態，下次重繪（例如按了套用之後）才不會被清空、消失
+                        st.session_state["annot_bboxes"] = [item["bbox"] for item in annot_result]
+                        st.session_state["annot_labels"] = [item.get("label_id", 0) for item in annot_result]
+
                     if annot_result and st.button("✅ 套用這些矩形到面積結果", key="apply_annot_rects"):
                         for item in annot_result:
                             x, y, bw, bh = item["bbox"]
                             pts = [(x, y), (x + bw, y), (x + bw, y + bh), (x, y + bh)]
-                            color = hex_to_bgr(FIXED_COLORS[item.get("label_id", 0) % len(FIXED_COLORS)])
+                            color_hex = ANNOTATION_REAL_COLORS[item.get("label_id", 0) % len(ANNOTATION_REAL_COLORS)]
+                            color = hex_to_bgr(color_hex)
                             st.session_state["finished_shapes"].append({"points": pts, "color": color})
-                        st.rerun()
+                        st.success(f"已套用 {len(annot_result)} 個矩形，畫布上的矩形保留不變，可以繼續調整或再畫新的。")
                 except Exception as e:
                     st.error(f"矩形工具載入失敗：{e}")
 
