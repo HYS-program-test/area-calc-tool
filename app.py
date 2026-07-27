@@ -29,8 +29,6 @@ from openai_reviewer import review_room_candidates
 from openai_room_detector import (
     AIRoomDetectionOptions,
     detect_rooms_with_openai,
-    draw_building_preview,
-    locate_building_bbox,
 )
 
 
@@ -337,7 +335,7 @@ with st.sidebar:
 
 api_key = st.secrets.get("OPENAI_API_KEY", "")
 
-action1, action2, action3 = st.columns(3)
+action1, action2 = st.columns(2)
 
 with action1:
     if st.button(
@@ -387,19 +385,10 @@ with action2:
         st.session_state.canvas_version += 1
         st.rerun()
 
-with action3:
-    show_localization = st.checkbox("顯示建築粗定位", False)
 
 if not api_key:
     st.error("尚未設定 OPENAI_API_KEY。")
 
-if show_localization:
-    building_box = locate_building_bbox(display_image.convert("RGB"))
-    st.image(
-        draw_building_preview(display_image, building_box),
-        caption="紅框是 OpenCV 送給 GPT 的完整建築主體範圍。",
-        use_container_width=True,
-    )
 
 if st.session_state.ai_detection:
     detection = st.session_state.ai_detection
