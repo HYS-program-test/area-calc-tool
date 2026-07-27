@@ -1,63 +1,52 @@
-# AI 平面圖空間辨識與空調設備選型
+OpenCV 粗定位＋GPT 精辨識版
 
-本版已將主要流程從 OpenCV 規則式封閉空間偵測，改為：
+新版流程
 
-```text
-平面圖
-→ OpenAI Vision 直接辨識房間
-→ 回傳正規化多邊形
-→ 轉成 Streamlit 可編輯框線
-→ 人工確認
+PDF／圖片
+→ OpenCV 找出建築主體
+→ 將建築主體切成 1～9 個核心責任區
+→ 每個核心區加上重疊上下文
+→ GPT 分別辨識局部房間
+→ 局部座標映射回完整圖面
+→ 排除低信心、過小與重複候選框
+→ Streamlit 人工修正
 → 比例尺校正
-→ 面積與空調負荷
-```
+→ 面積與空調設備選型
 
-## 檔案
+為什麼改成局部辨識
 
-```text
+完整施工圖同時包含尺寸線、家具、門弧、樓梯與文字。OpenCV 不再嘗試直接把這些線條封閉成房間，只負責定位與切圖；GPT 則在較小的局部圖中分辨真正牆體與房間。
+
+主要檔案
+
 app.py
 openai_room_detector.py
 openai_reviewer.py
 floorplan_detector.py
 geometry_utils.py
 requirements.txt
-```
 
-`floorplan_detector.py` 仍保留為備援辨識與自動裁切用途。
+建議起始設定
 
-## Streamlit Secrets
+OpenAI 視覺模型：gpt-4.1
+最低信心分數：0.35
+GPT 分析區塊數上限：6
+區塊上下文重疊率：0.18
 
-```toml
+區塊數越多，局部圖越清楚，但 API 呼叫次數會增加。一般單層住宅建議先使用 4～6 個區塊。
+
+Streamlit Secrets
+
 OPENAI_API_KEY = "sk-proj-..."
 
-EQUIPMENT_SHEET_ID = "Google Sheet ID"
+Google Sheets 設定沿用原版。
 
-[gcp_service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = """-----BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-"""
-client_email = "..."
-client_id = "..."
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "..."
-```
+重要限制
 
-## 執行
+GPT 回傳的是候選框，不是 CAD 測量成果。
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+AI 的多邊形仍可能在門洞或內牆處偏移。
 
-## 使用注意
+必須人工確認框線並使用已知尺寸線校正比例尺。
 
-- AI 直接回傳的是候選多邊形，不是 CAD 測量成果。
-- 必須在畫布確認內牆邊界，再做比例尺校正。
-- 同一張圖重跑 AI，框線可能略有差異。
-- 完整施工圖包含家具、尺寸線、門弧時，AI 通常比單純的形態學封閉空間更能理解語意，但座標仍可能有偏移。
+若某一區塊呼叫失敗，程式會保留其他成功區塊的結果，並在摘要中列出錯誤。
