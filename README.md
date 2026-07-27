@@ -1,48 +1,50 @@
-# 顯示與座標基礎修正版
+# 單一可編輯平面圖版本
 
-本版先處理兩個基礎問題，不改動 AI 辨識策略：
+## 本版目標
 
-1. Canvas 底圖顯示。
-2. AI 多邊形進入 Fabric.js 後的座標偏移。
-
-## 主要修改
-
-### geometry_utils.py
-
-- AI 多邊形由 Fabric Path 改成 Fabric Polygon。
-- Polygon 使用中心點作為 `left/top/pathOffset`。
-- 完整處理移動、縮放與旋轉後的座標還原。
-- 舊版 Path 加入 `pathOffset` 扣除，保留相容性。
-
-### app.py
-
-- Canvas 背景固定使用已載入的 RGB PNG。
-- 顯示原始底圖檢查。
-- 增加「座標驗證預覽」，直接用 PIL 畫框，不經 Canvas。
-- Canvas key 納入底圖尺寸，避免 rerun 沿用舊背景。
-- 保留含底圖 PDF 匯出。
-
-### requirements.txt
-
-鎖定：
+畫面只顯示一張平面圖：
 
 ```text
-streamlit==1.41.1
-streamlit-drawable-canvas-fix==0.9.8
+同一個 Fabric Canvas
+├─ 最底層：不可選取的平面圖底圖
+└─ 上層：可移動、拉伸、改色及刪除的 AI 多邊形
 ```
 
-避免新版 Streamlit 內部圖片網址機制與 Canvas 元件不相容。
+不再顯示：
 
-## 測試判讀
+- 額外空白底圖檢查
+- PIL 座標診斷圖
+- 另一張沒有底圖的 Canvas
 
-### 座標驗證預覽正確、Canvas 錯誤
+## 底圖處理
 
-表示 AI 座標正確，仍是 Canvas/Fabric 顯示層問題。
+底圖不再使用 `st_canvas(background_image=...)`，而是轉成 base64 PNG，
+作為 Fabric Image 物件放進 `initial_drawing.objects` 的第一層。
 
-### 座標驗證預覽也錯誤
+底圖設定：
 
-表示 AI 回傳的房間位置或多邊形本身錯誤，下一階段才修改 AI 流程。
+```text
+selectable = false
+evented = false
+```
 
-### 底圖檢查有圖、Canvas 無圖
+因此底圖與框線會在同一個畫布顯示，但底圖不能被移動或刪除。
 
-表示問題集中在 drawable canvas 套件，而不是 PDF 轉圖或裁切。
+## AI 辨識
+
+改成兩階段：
+
+1. 完整建築圖辨識房間名稱及大致 bbox。
+2. 每個房間局部裁切，再由 GPT 精修內牆多邊形。
+
+這比直接要求 GPT 在整張圖上一次輸出全部 polygon 更穩定。
+
+## 更新檔案
+
+```text
+app.py
+openai_room_detector.py
+geometry_utils.py
+requirements.txt
+README.md
+```

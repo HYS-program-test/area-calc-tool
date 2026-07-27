@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import re
@@ -17,15 +18,12 @@ from streamlit_drawable_canvas import st_canvas
 from floorplan_detector import crop_to_main_floorplan
 from geometry_utils import (
     cooling_load,
-    fabric_line_endpoints,
     fabric_object_points,
     is_area_object,
     pixel_area_to_m2,
     polygon_area_px2,
-    polygon_to_fabric_path,
-    px_per_meter_from_line,
+    polygon_to_fabric_polygon,
 )
-from openai_reviewer import review_room_candidates
 from openai_room_detector import (
     AIRoomDetectionOptions,
     detect_rooms_with_openai,
@@ -55,7 +53,6 @@ def init_session() -> None:
         "canvas_version": 0,
         "px_per_meter": None,
         "ai_detection": None,
-        "review": None,
         "equipment_table": None,
     }
     for key, value in defaults.items():
@@ -105,6 +102,7 @@ def resize_image(
     scale = min(1.0, target_width / image.width)
     if scale >= 1:
         return image.copy()
+
     return image.resize(
         (
             round(image.width * scale),
@@ -114,23 +112,64 @@ def resize_image(
     )
 
 
-def canvas_background(image: Image.Image) -> Image.Image:
-    """產生畫布專用、已完全載入的 RGB PNG。
-
-    Canvas 套件對 RGBA 與新版 Streamlit 暫存圖片網址較敏感；
-    本版固定使用 RGB PNG，並在 requirements.txt 鎖定相容版本。
-    """
+def image_to_data_url(image: Image.Image) -> str:
     buffer = io.BytesIO()
     image.convert("RGB").save(buffer, format="PNG", optimize=False)
-    buffer.seek(0)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
-    opened = Image.open(buffer)
-    opened.load()
-    return opened.convert("RGB").copy()
+
+def fabric_background_object(
+    image: Image.Image,
+) -> dict:
+    """把底圖放進同一個 Fabric 畫布物件層。
+
+    不再使用 st_canvas(background_image=...)，避免 rerun 後背景網址失效。
+    """
+    return {
+        "type": "image",
+        "version": "4.4.0",
+        "originX": "left",
+        "originY": "top",
+        "left": 0,
+        "top": 0,
+        "width": image.width,
+        "height": image.height,
+        "scaleX": 1,
+        "scaleY": 1,
+        "angle": 0,
+        "opacity": 1,
+        "visible": True,
+        "selectable": False,
+        "evented": False,
+        "hasControls": False,
+        "hasBorders": False,
+        "objectCaching": False,
+        "crossOrigin": "anonymous",
+        "src": image_to_data_url(image),
+        "name": "__floorplan_background__",
+    }
 
 
 def canvas_objects() -> list[dict]:
     return st.session_state.drawing.get("objects", [])
+
+
+def ensure_background(
+    image: Image.Image,
+) -> None:
+    foreground = [
+        obj
+        for obj in canvas_objects()
+        if obj.get("name") != "__floorplan_background__"
+    ]
+    st.session_state.drawing = {
+        "version": "4.4.0",
+        "objects": [
+            fabric_background_object(image),
+            *foreground,
+        ],
+    }
 
 
 def room_records() -> list[dict]:
@@ -138,6 +177,8 @@ def room_records() -> list[dict]:
     number = 0
 
     for object_index, obj in enumerate(canvas_objects()):
+        if obj.get("name") == "__floorplan_background__":
+            continue
         if not is_area_object(obj):
             continue
 
@@ -165,12 +206,11 @@ def room_records() -> list[dict]:
 def room_to_canvas_object(
     room: dict,
     index: int,
-    stroke_width: int = 3,
 ) -> dict:
-    obj = polygon_to_fabric_path(
+    obj = polygon_to_fabric_polygon(
         room["points"],
         COLORS[(index - 1) % len(COLORS)],
-        stroke_width,
+        3,
         room.get("room_id") or f"R{index:02d}",
         "openai",
     )
@@ -219,7 +259,6 @@ def export_overlay_pdf(
     records: list[dict],
     px_per_meter: float | None,
 ) -> bytes:
-    """將框線、名稱與面積直接疊加在原始底圖後輸出 PDF。"""
     output = base_image.convert("RGB").copy()
     draw = ImageDraw.Draw(output)
 
@@ -242,21 +281,14 @@ def export_overlay_pdf(
             else f"{room_name}  {area_m2:.2f} m²"
         )
 
-        polygon = points
-        center_x = round(sum(x for x, _ in polygon) / len(polygon))
-        center_y = round(sum(y for _, y in polygon) / len(polygon))
-
-        text_box = draw.textbbox((0, 0), label)
-        text_w = text_box[2] - text_box[0]
-        text_h = text_box[3] - text_box[1]
-        padding = 5
-
+        center_x = round(sum(x for x, _ in points) / len(points))
+        center_y = round(sum(y for _, y in points) / len(points))
         draw.rectangle(
             (
-                center_x - padding,
-                center_y - padding,
-                center_x + text_w + padding,
-                center_y + text_h + padding,
+                center_x - 4,
+                center_y - 4,
+                center_x + max(60, len(label) * 8),
+                center_y + 18,
             ),
             fill="white",
             outline=color,
@@ -273,8 +305,8 @@ init_session()
 
 st.markdown("## ❄️ AI 平面圖空調設備選型")
 st.caption(
-    "OpenCV 先定位建築主體，再由 GPT 針對完整建築裁切圖辨識房間。"
-    "AI 產生的框線可移動、拉伸、刪除或改色。"
+    "畫面只保留一張可編輯平面圖。"
+    "底圖、AI 框線、移動、拉伸與刪除都在同一個 Fabric 畫布中完成。"
 )
 
 uploaded = st.file_uploader(
@@ -293,6 +325,7 @@ if is_pdf:
     document = fitz.open(stream=data, filetype="pdf")
     page_count = document.page_count
     document.close()
+
     if page_count > 1:
         page_index = st.selectbox(
             "PDF 頁面",
@@ -307,7 +340,6 @@ if st.session_state.file_key != file_key:
     st.session_state.canvas_version += 1
     st.session_state.px_per_meter = None
     st.session_state.ai_detection = None
-    st.session_state.review = None
     st.session_state.equipment_table = None
 
 if is_pdf:
@@ -321,22 +353,17 @@ else:
 
 source_image = crop_to_main_floorplan(source_image)
 display_image = resize_image(source_image, DEFAULT_WIDTH)
-background = canvas_background(display_image)
+ensure_background(display_image)
 
-# 側邊欄只保留人工編輯需要的項目。
 with st.sidebar:
     st.header("框線編輯")
-    edit_mode = st.radio(
-        "操作",
-        ["移動／拉伸", "刪除選取框線"],
-    )
     replacement_color = st.color_picker(
         "選取框線顏色",
         "#3B82F6",
     )
     st.caption(
-        "在畫布點選框線後，可拖曳移動或拉伸。"
-        "刪除與改色請先在下方框線管理選取空間。"
+        "在畫布點選框線即可拖曳或拉伸。"
+        "刪除與改色請在畫布下方選取空間。"
     )
 
 api_key = st.secrets.get("OPENAI_API_KEY", "")
@@ -350,31 +377,31 @@ with action1:
         use_container_width=True,
         disabled=not api_key,
     ):
-        options = AIRoomDetectionOptions(
-            include_balcony=True,
-            include_corridor=True,
-            include_stair=False,
-            include_bathroom=True,
-            minimum_confidence=0.35,
-        )
         try:
-            with st.spinner("OpenCV 定位建築主體，GPT 正在辨識房間…"):
+            with st.spinner(
+                "AI 先理解完整格局，再逐房間精修內牆邊界…"
+            ):
                 result = detect_rooms_with_openai(
                     api_key=api_key,
                     image=display_image.convert("RGB"),
                     model=DEFAULT_MODEL,
-                    options=options,
+                    options=AIRoomDetectionOptions(),
                 )
 
             st.session_state.drawing = {
                 "version": "4.4.0",
                 "objects": [
-                    room_to_canvas_object(room, index)
-                    for index, room in enumerate(result["rooms"], start=1)
+                    fabric_background_object(display_image),
+                    *[
+                        room_to_canvas_object(room, index)
+                        for index, room in enumerate(
+                            result["rooms"],
+                            start=1,
+                        )
+                    ],
                 ],
             }
             st.session_state.ai_detection = result
-            st.session_state.review = None
             st.session_state.canvas_version += 1
             st.rerun()
         except Exception as error:
@@ -385,9 +412,11 @@ with action2:
         "清空全部框線",
         use_container_width=True,
     ):
-        st.session_state.drawing = {"version": "4.4.0", "objects": []}
+        st.session_state.drawing = {
+            "version": "4.4.0",
+            "objects": [fabric_background_object(display_image)],
+        }
         st.session_state.ai_detection = None
-        st.session_state.review = None
         st.session_state.canvas_version += 1
         st.rerun()
 
@@ -396,130 +425,33 @@ if not api_key:
 
 if st.session_state.ai_detection:
     detection = st.session_state.ai_detection
-    assessment = detection.get("image_assessment", {})
-    summary1, summary2, summary3 = st.columns(3)
-    summary1.metric("接受候選空間", len(detection.get("rooms", [])))
-    summary2.metric("排除候選空間", len(detection.get("rejected_rooms", [])))
-    summary3.metric("圖面品質", assessment.get("quality", "未知"))
-
-    accepted_points = [
-        point
-        for room in detection.get("rooms", [])
-        for point in room.get("points", [])
-    ]
-    if accepted_points:
-        min_x = min(point[0] for point in accepted_points)
-        max_x = max(point[0] for point in accepted_points)
-        min_y = min(point[1] for point in accepted_points)
-        max_y = max(point[1] for point in accepted_points)
-        st.caption(
-            "AI 座標範圍："
-            f"x={min_x:.1f}～{max_x:.1f}／{display_image.width}px，"
-            f"y={min_y:.1f}～{max_y:.1f}／{display_image.height}px"
-        )
-
-    if detection.get("rejected_rooms"):
-        with st.expander("查看被排除的候選框"):
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "空間名稱": item["room_name"],
-                            "信心分數": item["confidence"],
-                            "排除原因": item.get("rejected_reason", ""),
-                        }
-                        for item in detection["rejected_rooms"]
-                    ]
-                ),
-                hide_index=True,
-                use_container_width=True,
-            )
-
-
-def create_coordinate_diagnostic(
-    base_image: Image.Image,
-    current_records: list[dict],
-) -> Image.Image:
-    """直接用 PIL 畫出目前座標，不經 Fabric Canvas。
-
-    若此圖正確但下方 Canvas 錯誤，代表問題位於 Fabric 座標層；
-    若此圖也錯誤，代表 AI 回傳座標本身需要再改善。
-    """
-    preview = base_image.convert("RGB").copy()
-    draw = ImageDraw.Draw(preview)
-
-    for room in current_records:
-        points = [
-            (round(x), round(y))
-            for x, y in room["points"]
-        ]
-        if len(points) < 3:
-            continue
-
-        draw.line(
-            points + [points[0]],
-            fill=room["color"],
-            width=4,
-        )
-        center_x = round(
-            sum(x for x, _ in points) / len(points)
-        )
-        center_y = round(
-            sum(y for _, y in points) / len(points)
-        )
-        draw.text(
-            (center_x, center_y),
-            room.get("room_name") or room["room_id"],
-            fill=room["color"],
-        )
-
-    return preview
-
+    c1, c2, c3 = st.columns(3)
+    c1.metric("接受候選空間", len(detection.get("rooms", [])))
+    c2.metric("排除候選空間", len(detection.get("rejected_rooms", [])))
+    c3.metric(
+        "圖面品質",
+        detection.get("image_assessment", {}).get("quality", "未知"),
+    )
 
 st.markdown("### 候選空間人工確認")
-st.image(
-    display_image,
-    caption=f"底圖檢查：{display_image.width} × {display_image.height} px",
-    use_container_width=True,
-)
 st.caption(
-    "點選彩色框線後可拖曳、拉伸；"
-    "框線刪除與改色可在畫布下方的管理區操作。"
+    "畫布內的底圖不可選取；彩色框線可點選、拖曳、拉伸。"
 )
-
-current_records_before_canvas = room_records()
-
-with st.expander(
-    "座標驗證預覽（不經 Canvas）",
-    expanded=True,
-):
-    st.image(
-        create_coordinate_diagnostic(
-            display_image,
-            current_records_before_canvas,
-        ),
-        caption=(
-            "此圖直接將目前多邊形座標畫在底圖上。"
-            "先確認這裡的位置是否正確，再比較下方可編輯畫布。"
-        ),
-        use_container_width=True,
-    )
 
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
     stroke_width=3,
     stroke_color="#FF6347",
-    background_image=background,
     background_color="#FFFFFF",
     update_streamlit=True,
-    height=background.height,
-    width=background.width,
+    height=display_image.height,
+    width=display_image.width,
     drawing_mode="transform",
     initial_drawing=st.session_state.drawing,
     display_toolbar=False,
     key=(
-        f"canvas_{st.session_state.canvas_version}_"
-        f"{background.width}x{background.height}"
+        f"single_canvas_{st.session_state.canvas_version}_"
+        f"{display_image.width}x{display_image.height}"
     ),
 )
 
@@ -530,13 +462,28 @@ if canvas_result.json_data is not None:
     for index, obj in enumerate(new_drawing.get("objects", [])):
         if index < len(old_objects):
             for metadata_key in [
-                "room_id", "room_name", "room_type", "confidence",
-                "include_in_area", "source", "ai_reason",
+                "name", "room_id", "room_name", "room_type",
+                "confidence", "include_in_area", "source", "ai_reason",
             ]:
                 if metadata_key in old_objects[index]:
-                    obj.setdefault(metadata_key, old_objects[index][metadata_key])
+                    obj.setdefault(
+                        metadata_key,
+                        old_objects[index][metadata_key],
+                    )
 
-    st.session_state.drawing = new_drawing
+    # 底圖一定維持最底層且不可操作。
+    foreground = [
+        obj
+        for obj in new_drawing.get("objects", [])
+        if obj.get("name") != "__floorplan_background__"
+    ]
+    st.session_state.drawing = {
+        "version": "4.4.0",
+        "objects": [
+            fabric_background_object(display_image),
+            *foreground,
+        ],
+    }
 
 records = room_records()
 
@@ -552,6 +499,7 @@ if records:
     )
 
     manage1, manage2 = st.columns(2)
+
     with manage1:
         if st.button(
             "套用選取顏色",
@@ -579,7 +527,10 @@ if records:
             st.session_state.drawing["objects"] = [
                 obj
                 for index, obj in enumerate(canvas_objects())
-                if index not in delete_indices
+                if (
+                    obj.get("name") == "__floorplan_background__"
+                    or index not in delete_indices
+                )
             ]
             st.session_state.canvas_version += 1
             st.rerun()
@@ -595,6 +546,7 @@ if records:
             for room in records
         ]
     )
+
     edited_metadata = st.data_editor(
         metadata_df,
         hide_index=True,
@@ -603,7 +555,8 @@ if records:
         column_config={
             "納入面積": st.column_config.CheckboxColumn("納入面積"),
             "信心分數": st.column_config.NumberColumn(
-                "信心分數", format="%.2f"
+                "信心分數",
+                format="%.2f",
             ),
         },
         key="room_metadata",
@@ -613,6 +566,7 @@ if records:
         row["編號"]: row
         for row in edited_metadata.to_dict("records")
     }
+
     for obj in canvas_objects():
         room_id = obj.get("room_id")
         if room_id in metadata_lookup:
@@ -623,75 +577,15 @@ if records:
 else:
     st.info("尚無候選框線。")
 
-st.markdown("### 比例尺校正")
-st.caption("請在圖上已知尺寸的兩端建立校正線，或直接輸入 px/m。")
+st.markdown("### 比例尺與面積")
+px_per_meter = st.number_input(
+    "直接輸入比例尺（px/m）",
+    min_value=0.0,
+    value=float(st.session_state.px_per_meter or 0),
+)
+if px_per_meter > 0:
+    st.session_state.px_per_meter = px_per_meter
 
-# 保留可建立校正線，但不放在左側調整項目。
-calibration_mode = st.toggle("開啟校正線繪製", False)
-if calibration_mode:
-    calibration_canvas = st_canvas(
-        fill_color="rgba(0,0,0,0)",
-        stroke_width=3,
-        stroke_color="#111111",
-        background_image=background,
-        background_color="#FFFFFF",
-        update_streamlit=True,
-        height=background.height,
-        width=background.width,
-        drawing_mode="line",
-        display_toolbar=True,
-        key="calibration_canvas",
-    )
-else:
-    calibration_canvas = None
-
-cal1, cal2, cal3 = st.columns(3)
-with cal1:
-    actual_cm = st.number_input(
-        "校正線實際長度（cm）",
-        min_value=1.0,
-        value=1000.0,
-    )
-with cal2:
-    can_apply = (
-        calibration_canvas is not None
-        and calibration_canvas.json_data
-        and calibration_canvas.json_data.get("objects")
-    )
-    if st.button(
-        "套用校正線",
-        disabled=not can_apply,
-        use_container_width=True,
-    ):
-        latest = calibration_canvas.json_data["objects"][-1]
-        endpoints = fabric_line_endpoints(latest)
-        if endpoints:
-            st.session_state.px_per_meter = px_per_meter_from_line(
-                endpoints[0],
-                endpoints[1],
-                actual_cm / 100,
-            )
-            st.rerun()
-with cal3:
-    manual_px = st.number_input(
-        "直接輸入 px/m",
-        min_value=0.0,
-        value=float(st.session_state.px_per_meter or 0),
-    )
-    if manual_px > 0:
-        st.session_state.px_per_meter = manual_px
-
-if st.session_state.px_per_meter:
-    st.success(f"目前比例尺：{st.session_state.px_per_meter:.3f} px/m")
-elif auto_scale:
-    st.warning(
-        f"圖面文字可能包含比例 1:{auto_scale}；"
-        "仍建議使用已知尺寸線校正。"
-    )
-else:
-    st.warning("尚未完成比例尺校正，目前僅能計算像素面積。")
-
-st.markdown("### 面積與空調負荷")
 load_per_ping = st.selectbox(
     "每坪建議負荷值（kcal/h·坪）",
     LOAD_OPTIONS,
@@ -729,72 +623,16 @@ for room in room_records():
                 if included and load["kcal_h"] is not None
                 else None
             ),
-            "需求冷房能力(kW)": (
-                round(load["kw"], 2)
-                if included and load["kw"] is not None
-                else None
-            ),
         }
     )
 
 area_df = pd.DataFrame(area_rows)
 if not area_df.empty:
-    st.dataframe(area_df, hide_index=True, use_container_width=True)
-
-st.markdown("### 空調設備選型")
-models, equipment_lookup = equipment_data()
-equipment_rows = []
-
-for row in area_rows:
-    previous = next(
-        (
-            item for item in (st.session_state.equipment_table or [])
-            if item.get("編號") == row["編號"]
-        ),
-        {},
+    st.dataframe(
+        area_df,
+        hide_index=True,
+        use_container_width=True,
     )
-    indoor = previous.get("室內機", "")
-    info = equipment_lookup.get(indoor, {})
-
-    equipment_rows.append(
-        {
-            "編號": row["編號"],
-            "空間名稱": previous.get("空間名稱", row["空間名稱"]),
-            "面積(m²)": row["面積(m²)"] or 0,
-            "每坪建議負荷值": previous.get(
-                "每坪建議負荷值", load_per_ping
-            ),
-            "需求冷房能力": row["需求冷房能力(kcal/h)"] or 0,
-            "室內機": indoor,
-            "類型": info.get("類型", ""),
-            "室內機冷房能力": info.get("室內機冷房能力", ""),
-            "室外機": info.get("室外機", ""),
-            "連結率": previous.get("連結率", ""),
-        }
-    )
-
-equipment_df = pd.DataFrame(equipment_rows)
-edited_equipment = st.data_editor(
-    equipment_df,
-    num_rows="dynamic",
-    use_container_width=True,
-    column_config={
-        "編號": st.column_config.TextColumn(disabled=True),
-        "面積(m²)": st.column_config.NumberColumn(disabled=True),
-        "每坪建議負荷值": st.column_config.SelectboxColumn(
-            options=LOAD_OPTIONS
-        ),
-        "需求冷房能力": st.column_config.NumberColumn(disabled=True),
-        "室內機": st.column_config.SelectboxColumn(
-            options=models or [""]
-        ),
-        "類型": st.column_config.TextColumn(disabled=True),
-        "室內機冷房能力": st.column_config.TextColumn(disabled=True),
-        "室外機": st.column_config.TextColumn(disabled=True),
-    },
-    key="equipment_editor",
-)
-st.session_state.equipment_table = edited_equipment.to_dict("records")
 
 st.markdown("### 匯出")
 export1, export2, export3 = st.columns(3)
