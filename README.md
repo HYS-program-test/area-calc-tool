@@ -1,38 +1,48 @@
-OpenCV 粗定位＋GPT 完整建築辨識版
+# 顯示與座標基礎修正版
 
-本版修正
+本版先處理兩個基礎問題，不改動 AI 辨識策略：
 
-不再將建築切成多個 GPT 區塊，避免產生跨房間的大框與重複框。
+1. Canvas 底圖顯示。
+2. AI 多邊形進入 Fabric.js 後的座標偏移。
 
-OpenCV 只找出完整建築主體，GPT 一次理解完整室內配置。
+## 主要修改
 
-額外傳送 0～1000 座標網格圖，提升 polygon 座標一致性。
+### geometry_utils.py
 
-排除占整張圖面積過大的異常框。
+- AI 多邊形由 Fabric Path 改成 Fabric Polygon。
+- Polygon 使用中心點作為 `left/top/pathOffset`。
+- 完整處理移動、縮放與旋轉後的座標還原。
+- 舊版 Path 加入 `pathOffset` 扣除，保留相容性。
 
-修正 Streamlit 畫布底圖可能消失，只剩彩色框線的問題。
+### app.py
 
-匯出 PDF 會把框線、空間名稱及面積疊加在平面圖底圖上。
+- Canvas 背景固定使用已載入的 RGB PNG。
+- 顯示原始底圖檢查。
+- 增加「座標驗證預覽」，直接用 PIL 畫框，不經 Canvas。
+- Canvas key 納入底圖尺寸，避免 rerun 沿用舊背景。
+- 保留含底圖 PDF 匯出。
 
-左側僅保留框線人工編輯功能：移動、拉伸、刪除及改色。
+### requirements.txt
 
-更新檔案
+鎖定：
 
-app.py
-openai_room_detector.py
-README.md
+```text
+streamlit==1.41.1
+streamlit-drawable-canvas-fix==0.9.8
+```
 
-其他檔案沿用上一版。
+避免新版 Streamlit 內部圖片網址機制與 Canvas 元件不相容。
 
-操作順序
+## 測試判讀
 
-上傳平面圖
-→ AI 重新辨識房間
-→ 人工移動／拉伸／刪除／改色
-→ 比例尺校正
-→ 查看面積與負荷
-→ 下載含底圖框面積 PDF
+### 座標驗證預覽正確、Canvas 錯誤
 
-注意
+表示 AI 座標正確，仍是 Canvas/Fabric 顯示層問題。
 
-AI 產生的是初始候選框，不是正式 CAD 測量成果。使用面積前仍須人工確認內牆位置並完成比例尺校正。
+### 座標驗證預覽也錯誤
+
+表示 AI 回傳的房間位置或多邊形本身錯誤，下一階段才修改 AI 流程。
+
+### 底圖檢查有圖、Canvas 無圖
+
+表示問題集中在 drawable canvas 套件，而不是 PDF 轉圖或裁切。

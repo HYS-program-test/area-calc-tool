@@ -11,7 +11,7 @@ import gspread
 import pandas as pd
 import streamlit as st
 from google.oauth2.service_account import Credentials
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from streamlit_drawable_canvas import st_canvas
 
 from floorplan_detector import crop_to_main_floorplan
@@ -115,12 +115,18 @@ def resize_image(
 
 
 def canvas_background(image: Image.Image) -> Image.Image:
-    """建立完全載入的 RGBA 副本，避免畫布只顯示框線而底圖消失。"""
+    """產生畫布專用、已完全載入的 RGB PNG。
+
+    Canvas 套件對 RGBA 與新版 Streamlit 暫存圖片網址較敏感；
+    本版固定使用 RGB PNG，並在 requirements.txt 鎖定相容版本。
+    """
     buffer = io.BytesIO()
-    image.convert("RGBA").save(buffer, format="PNG")
+    image.convert("RGB").save(buffer, format="PNG", optimize=False)
     buffer.seek(0)
-    with Image.open(buffer) as opened:
-        return opened.convert("RGBA").copy()
+
+    opened = Image.open(buffer)
+    opened.load()
+    return opened.convert("RGB").copy()
 
 
 def canvas_objects() -> list[dict]:
@@ -385,10 +391,8 @@ with action2:
         st.session_state.canvas_version += 1
         st.rerun()
 
-
 if not api_key:
     st.error("尚未設定 OPENAI_API_KEY。")
-
 
 if st.session_state.ai_detection:
     detection = st.session_state.ai_detection
@@ -397,6 +401,22 @@ if st.session_state.ai_detection:
     summary1.metric("接受候選空間", len(detection.get("rooms", [])))
     summary2.metric("排除候選空間", len(detection.get("rejected_rooms", [])))
     summary3.metric("圖面品質", assessment.get("quality", "未知"))
+
+    accepted_points = [
+        point
+        for room in detection.get("rooms", [])
+        for point in room.get("points", [])
+    ]
+    if accepted_points:
+        min_x = min(point[0] for point in accepted_points)
+        max_x = max(point[0] for point in accepted_points)
+        min_y = min(point[1] for point in accepted_points)
+        max_y = max(point[1] for point in accepted_points)
+        st.caption(
+            "AI 座標範圍："
+            f"x={min_x:.1f}～{max_x:.1f}／{display_image.width}px，"
+            f"y={min_y:.1f}～{max_y:.1f}／{display_image.height}px"
+        )
 
     if detection.get("rejected_rooms"):
         with st.expander("查看被排除的候選框"):
@@ -415,24 +435,92 @@ if st.session_state.ai_detection:
                 use_container_width=True,
             )
 
+
+def create_coordinate_diagnostic(
+    base_image: Image.Image,
+    current_records: list[dict],
+) -> Image.Image:
+    """直接用 PIL 畫出目前座標，不經 Fabric Canvas。
+
+    若此圖正確但下方 Canvas 錯誤，代表問題位於 Fabric 座標層；
+    若此圖也錯誤，代表 AI 回傳座標本身需要再改善。
+    """
+    preview = base_image.convert("RGB").copy()
+    draw = ImageDraw.Draw(preview)
+
+    for room in current_records:
+        points = [
+            (round(x), round(y))
+            for x, y in room["points"]
+        ]
+        if len(points) < 3:
+            continue
+
+        draw.line(
+            points + [points[0]],
+            fill=room["color"],
+            width=4,
+        )
+        center_x = round(
+            sum(x for x, _ in points) / len(points)
+        )
+        center_y = round(
+            sum(y for _, y in points) / len(points)
+        )
+        draw.text(
+            (center_x, center_y),
+            room.get("room_name") or room["room_id"],
+            fill=room["color"],
+        )
+
+    return preview
+
+
 st.markdown("### 候選空間人工確認")
+st.image(
+    display_image,
+    caption=f"底圖檢查：{display_image.width} × {display_image.height} px",
+    use_container_width=True,
+)
 st.caption(
     "點選彩色框線後可拖曳、拉伸；"
     "框線刪除與改色可在畫布下方的管理區操作。"
 )
+
+current_records_before_canvas = room_records()
+
+with st.expander(
+    "座標驗證預覽（不經 Canvas）",
+    expanded=True,
+):
+    st.image(
+        create_coordinate_diagnostic(
+            display_image,
+            current_records_before_canvas,
+        ),
+        caption=(
+            "此圖直接將目前多邊形座標畫在底圖上。"
+            "先確認這裡的位置是否正確，再比較下方可編輯畫布。"
+        ),
+        use_container_width=True,
+    )
 
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
     stroke_width=3,
     stroke_color="#FF6347",
     background_image=background,
+    background_color="#FFFFFF",
     update_streamlit=True,
     height=background.height,
     width=background.width,
     drawing_mode="transform",
     initial_drawing=st.session_state.drawing,
     display_toolbar=False,
-    key=f"canvas_{st.session_state.canvas_version}",
+    key=(
+        f"canvas_{st.session_state.canvas_version}_"
+        f"{background.width}x{background.height}"
+    ),
 )
 
 if canvas_result.json_data is not None:
@@ -546,6 +634,7 @@ if calibration_mode:
         stroke_width=3,
         stroke_color="#111111",
         background_image=background,
+        background_color="#FFFFFF",
         update_streamlit=True,
         height=background.height,
         width=background.width,
