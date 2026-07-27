@@ -1,50 +1,43 @@
-# 單一可編輯平面圖版本
+# 單一畫布 v4：WebSocket 與框選修正
 
-## 本版目標
+## WebSocket 修正
 
-畫面只顯示一張平面圖：
+上一版將整張底圖轉成 base64，並存入 `st.session_state.drawing`。
+每次拖曳框線時，Streamlit 都可能透過 WebSocket 重送大型 JSON，
+造成：
 
 ```text
-同一個 Fabric Canvas
-├─ 最底層：不可選取的平面圖底圖
-└─ 上層：可移動、拉伸、改色及刪除的 AI 多邊形
+Cached ForwardMsg MISS
+框線閃爍
+Connection error
 ```
 
-不再顯示：
-
-- 額外空白底圖檢查
-- PIL 座標診斷圖
-- 另一張沒有底圖的 Canvas
-
-## 底圖處理
-
-底圖不再使用 `st_canvas(background_image=...)`，而是轉成 base64 PNG，
-作為 Fabric Image 物件放進 `initial_drawing.objects` 的第一層。
-
-底圖設定：
+本版改為：
 
 ```text
-selectable = false
-evented = false
+background_image = 壓縮 JPEG PIL 圖片
+session_state = 只保存小型 polygon JSON
 ```
 
-因此底圖與框線會在同一個畫布顯示，但底圖不能被移動或刪除。
+底圖不再進入 session_state，也不再反覆回傳 base64。
 
-## AI 辨識
+## 框選修正
 
-改成兩階段：
-
-1. 完整建築圖辨識房間名稱及大致 bbox。
-2. 每個房間局部裁切，再由 GPT 精修內牆多邊形。
-
-這比直接要求 GPT 在整張圖上一次輸出全部 polygon 更穩定。
-
-## 更新檔案
+GPT 不再直接輸出 polygon，只輸出：
 
 ```text
-app.py
-openai_room_detector.py
-geometry_utils.py
-requirements.txt
-README.md
+空間名稱
+空間類型
+大致 bbox
+```
+
+再由 OpenCV 以 bbox 中心作 seed，在局部範圍尋找封閉空白區域並轉成 polygon。
+
+若局部分割失敗，使用 GPT bbox 作可編輯矩形，而不是接受 GPT 產生的巨大錯誤 polygon。
+
+## 版本
+
+```text
+streamlit==1.49.1
+streamlit-drawable-canvas-fix==0.9.8
 ```

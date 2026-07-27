@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import io
 import json
 import re
@@ -41,8 +40,8 @@ COLORS = [
     "#A855F7", "#06B6D4", "#EC4899", "#84CC16",
 ]
 LOAD_OPTIONS = list(range(400, 1300, 100))
-DEFAULT_DPI = 200
-DEFAULT_WIDTH = 1100
+DEFAULT_DPI = 180
+DEFAULT_WIDTH = 900
 DEFAULT_MODEL = "gpt-4.1"
 
 
@@ -112,64 +111,23 @@ def resize_image(
     )
 
 
-def image_to_data_url(image: Image.Image) -> str:
+def stable_background(image: Image.Image) -> Image.Image:
+    """Canvas 背景只透過 background_image 傳送，不存入 session_state。"""
     buffer = io.BytesIO()
-    image.convert("RGB").save(buffer, format="PNG", optimize=False)
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
-
-
-def fabric_background_object(
-    image: Image.Image,
-) -> dict:
-    """把底圖放進同一個 Fabric 畫布物件層。
-
-    不再使用 st_canvas(background_image=...)，避免 rerun 後背景網址失效。
-    """
-    return {
-        "type": "image",
-        "version": "4.4.0",
-        "originX": "left",
-        "originY": "top",
-        "left": 0,
-        "top": 0,
-        "width": image.width,
-        "height": image.height,
-        "scaleX": 1,
-        "scaleY": 1,
-        "angle": 0,
-        "opacity": 1,
-        "visible": True,
-        "selectable": False,
-        "evented": False,
-        "hasControls": False,
-        "hasBorders": False,
-        "objectCaching": False,
-        "crossOrigin": "anonymous",
-        "src": image_to_data_url(image),
-        "name": "__floorplan_background__",
-    }
+    image.convert("RGB").save(
+        buffer,
+        format="JPEG",
+        quality=88,
+        optimize=True,
+    )
+    buffer.seek(0)
+    opened = Image.open(buffer)
+    opened.load()
+    return opened.convert("RGB").copy()
 
 
 def canvas_objects() -> list[dict]:
     return st.session_state.drawing.get("objects", [])
-
-
-def ensure_background(
-    image: Image.Image,
-) -> None:
-    foreground = [
-        obj
-        for obj in canvas_objects()
-        if obj.get("name") != "__floorplan_background__"
-    ]
-    st.session_state.drawing = {
-        "version": "4.4.0",
-        "objects": [
-            fabric_background_object(image),
-            *foreground,
-        ],
-    }
 
 
 def room_records() -> list[dict]:
@@ -177,8 +135,6 @@ def room_records() -> list[dict]:
     number = 0
 
     for object_index, obj in enumerate(canvas_objects()):
-        if obj.get("name") == "__floorplan_background__":
-            continue
         if not is_area_object(obj):
             continue
 
@@ -306,7 +262,7 @@ init_session()
 st.markdown("## ❄️ AI 平面圖空調設備選型")
 st.caption(
     "畫面只保留一張可編輯平面圖。"
-    "底圖、AI 框線、移動、拉伸與刪除都在同一個 Fabric 畫布中完成。"
+    "本版不把底圖 base64 存進 session_state，以降低 WebSocket 訊息大小與閃爍。"
 )
 
 uploaded = st.file_uploader(
@@ -353,7 +309,7 @@ else:
 
 source_image = crop_to_main_floorplan(source_image)
 display_image = resize_image(source_image, DEFAULT_WIDTH)
-ensure_background(display_image)
+background = stable_background(display_image)
 
 with st.sidebar:
     st.header("框線編輯")
@@ -362,7 +318,7 @@ with st.sidebar:
         "#3B82F6",
     )
     st.caption(
-        "在畫布點選框線即可拖曳或拉伸。"
+        "點選框線後可拖曳或拉伸。"
         "刪除與改色請在畫布下方選取空間。"
     )
 
@@ -379,7 +335,7 @@ with action1:
     ):
         try:
             with st.spinner(
-                "AI 先理解完整格局，再逐房間精修內牆邊界…"
+                "GPT 辨識空間位置，OpenCV 正在貼合局部邊界…"
             ):
                 result = detect_rooms_with_openai(
                     api_key=api_key,
@@ -391,14 +347,11 @@ with action1:
             st.session_state.drawing = {
                 "version": "4.4.0",
                 "objects": [
-                    fabric_background_object(display_image),
-                    *[
-                        room_to_canvas_object(room, index)
-                        for index, room in enumerate(
-                            result["rooms"],
-                            start=1,
-                        )
-                    ],
+                    room_to_canvas_object(room, index)
+                    for index, room in enumerate(
+                        result["rooms"],
+                        start=1,
+                    )
                 ],
             }
             st.session_state.ai_detection = result
@@ -414,7 +367,7 @@ with action2:
     ):
         st.session_state.drawing = {
             "version": "4.4.0",
-            "objects": [fabric_background_object(display_image)],
+            "objects": [],
         }
         st.session_state.ai_detection = None
         st.session_state.canvas_version += 1
@@ -435,13 +388,15 @@ if st.session_state.ai_detection:
 
 st.markdown("### 候選空間人工確認")
 st.caption(
-    "畫布內的底圖不可選取；彩色框線可點選、拖曳、拉伸。"
+    "底圖由 Canvas 的背景層載入，不進入 session_state；"
+    "彩色框線可點選、拖曳及拉伸。"
 )
 
 canvas_result = st_canvas(
     fill_color="rgba(0,0,0,0)",
     stroke_width=3,
     stroke_color="#FF6347",
+    background_image=background,
     background_color="#FFFFFF",
     update_streamlit=True,
     height=display_image.height,
@@ -450,7 +405,7 @@ canvas_result = st_canvas(
     initial_drawing=st.session_state.drawing,
     display_toolbar=False,
     key=(
-        f"single_canvas_{st.session_state.canvas_version}_"
+        f"single_canvas_v4_{st.session_state.canvas_version}_"
         f"{display_image.width}x{display_image.height}"
     ),
 )
@@ -462,7 +417,7 @@ if canvas_result.json_data is not None:
     for index, obj in enumerate(new_drawing.get("objects", [])):
         if index < len(old_objects):
             for metadata_key in [
-                "name", "room_id", "room_name", "room_type",
+                "room_id", "room_name", "room_type",
                 "confidence", "include_in_area", "source", "ai_reason",
             ]:
                 if metadata_key in old_objects[index]:
@@ -471,18 +426,9 @@ if canvas_result.json_data is not None:
                         old_objects[index][metadata_key],
                     )
 
-    # 底圖一定維持最底層且不可操作。
-    foreground = [
-        obj
-        for obj in new_drawing.get("objects", [])
-        if obj.get("name") != "__floorplan_background__"
-    ]
     st.session_state.drawing = {
         "version": "4.4.0",
-        "objects": [
-            fabric_background_object(display_image),
-            *foreground,
-        ],
+        "objects": new_drawing.get("objects", []),
     }
 
 records = room_records()
@@ -527,10 +473,7 @@ if records:
             st.session_state.drawing["objects"] = [
                 obj
                 for index, obj in enumerate(canvas_objects())
-                if (
-                    obj.get("name") == "__floorplan_background__"
-                    or index not in delete_indices
-                )
+                if index not in delete_indices
             ]
             st.session_state.canvas_version += 1
             st.rerun()
@@ -562,17 +505,16 @@ if records:
         key="room_metadata",
     )
 
-    metadata_lookup = {
+    lookup = {
         row["編號"]: row
         for row in edited_metadata.to_dict("records")
     }
-
     for obj in canvas_objects():
         room_id = obj.get("room_id")
-        if room_id in metadata_lookup:
-            obj["room_name"] = metadata_lookup[room_id]["空間名稱"]
+        if room_id in lookup:
+            obj["room_name"] = lookup[room_id]["空間名稱"]
             obj["include_in_area"] = bool(
-                metadata_lookup[room_id]["納入面積"]
+                lookup[room_id]["納入面積"]
             )
 else:
     st.info("尚無候選框線。")
@@ -628,11 +570,7 @@ for room in room_records():
 
 area_df = pd.DataFrame(area_rows)
 if not area_df.empty:
-    st.dataframe(
-        area_df,
-        hide_index=True,
-        use_container_width=True,
-    )
+    st.dataframe(area_df, hide_index=True, use_container_width=True)
 
 st.markdown("### 匯出")
 export1, export2, export3 = st.columns(3)
