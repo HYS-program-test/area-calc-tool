@@ -1,4 +1,4 @@
-streamlit==1.41.1
+streamlit>=1.49,<2
 streamlit-drawable-canvas-fix==0.9.8
 PyMuPDF>=1.24,<2
 opencv-python-headless>=4.10,<5
