@@ -30,7 +30,12 @@ from geometry_utils import (
     px_per_meter_from_line,
 )
 from openai_reviewer import review_room_candidates
-from openai_room_detector import AIRoomDetectionOptions, detect_rooms_with_openai
+from openai_room_detector import (
+    AIRoomDetectionOptions,
+    detect_rooms_with_openai,
+    draw_tile_proposals,
+    propose_tiles,
+)
 
 
 st.set_page_config(
@@ -274,8 +279,8 @@ init_session()
 
 st.markdown("## ❄️ AI 平面圖空調設備選型")
 st.caption(
-    "主要流程改為 OpenAI Vision 直接辨識空間候選框；"
-    "OpenCV 僅保留為備援。AI 框線仍須人工確認後才能作為面積計算依據。"
+    "主要流程：OpenCV 先定位建築主體並切成重疊區塊，"
+    "再由 GPT 逐區辨識房間；候選框仍須人工確認。"
 )
 
 uploaded = st.file_uploader(
@@ -340,6 +345,27 @@ with st.sidebar:
     include_corridor = st.checkbox("納入走道／玄關", True)
     include_bathroom = st.checkbox("納入衛浴", True)
     include_stair = st.checkbox("納入樓梯", False)
+    max_tiles = st.slider(
+        "GPT 分析區塊數上限",
+        min_value=1,
+        max_value=9,
+        value=6,
+        step=1,
+        help="區塊越多，局部線條越清楚，但 API 呼叫次數也會增加。",
+    )
+    tile_overlap = st.slider(
+        "區塊上下文重疊率",
+        min_value=0.05,
+        max_value=0.35,
+        value=0.18,
+        step=0.01,
+        format="%.2f",
+        help="保留核心區外的牆體上下文，避免房間在區塊邊界被截斷。",
+    )
+    show_cv_proposals = st.checkbox(
+        "顯示 OpenCV 粗定位區塊",
+        value=True,
+    )
 
     st.header("框線")
     tool = st.radio(
@@ -396,6 +422,45 @@ image, _ = resize_image(
 )
 image = safe_background(image)
 
+preview_options = AIRoomDetectionOptions(
+    include_balcony=include_balcony,
+    include_corridor=include_corridor,
+    include_stair=include_stair,
+    include_bathroom=include_bathroom,
+    minimum_confidence=minimum_confidence,
+    max_tiles=max_tiles,
+    tile_overlap_ratio=tile_overlap,
+)
+
+if show_cv_proposals:
+    try:
+        proposals, proposal_debug = propose_tiles(
+            image.convert("RGB"),
+            preview_options,
+        )
+        proposal_preview = draw_tile_proposals(
+            image.convert("RGB"),
+            proposals,
+            proposal_debug.get("building_box"),
+        )
+        with st.expander(
+            "OpenCV 粗定位預覽",
+            expanded=False,
+        ):
+            st.image(
+                proposal_preview,
+                caption=(
+                    "紅框：建築主體；藍框：各區塊責任區；"
+                    "灰框：送給 GPT 的重疊上下文。"
+                ),
+                use_container_width=True,
+            )
+            st.caption(
+                f"目前預計呼叫 GPT {len(proposals)} 次。"
+            )
+    except Exception as error:
+        st.warning(f"粗定位預覽失敗：{error}")
+
 button_ai, button_clear, button_fallback = st.columns(3)
 
 with button_ai:
@@ -411,6 +476,8 @@ with button_ai:
             include_stair=include_stair,
             include_bathroom=include_bathroom,
             minimum_confidence=minimum_confidence,
+            max_tiles=max_tiles,
+            tile_overlap_ratio=tile_overlap,
         )
 
         try:
@@ -610,6 +677,15 @@ if st.session_state.ai_detection:
         )
 
     rejected = detection.get("rejected_rooms", [])
+    tile_results = detection.get("tile_results", [])
+    if tile_results:
+        with st.expander("查看各 GPT 區塊辨識結果"):
+            st.dataframe(
+                pd.DataFrame(tile_results),
+                use_container_width=True,
+                hide_index=True,
+            )
+
     if rejected:
         with st.expander("查看被程式排除的低信心候選框"):
             st.dataframe(
