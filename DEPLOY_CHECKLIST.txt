@@ -1,0 +1,15 @@
+GitHub repository must contain exactly:
+
+app.py
+openai_room_detector.py
+floorplan_editor.py
+floorplan_detector.py
+geometry_utils.py
+requirements.txt
+README.md
+frontend/index.html
+
+Important: frontend is a directory, and index.html must be inside it.
+After commit, confirm this URL path exists in GitHub repository:
+frontend/index.html
+Then reboot the Streamlit app.
