@@ -1,11 +1,7 @@
-streamlit==1.49.1
-streamlit-drawable-canvas-fix==0.9.8
+streamlit>=1.49,<2
 PyMuPDF>=1.24,<2
-opencv-python-headless>=4.10,<5
-numpy>=1.26,<3
-pandas>=2.2,<3
 Pillow>=10.4,<12
 Shapely>=2.0,<3
 openai>=1.66,<3
-gspread>=6.1,<7
-google-auth>=2.35,<3
+pandas>=2.2,<3
+opencv-python-headless>=4.10,<5

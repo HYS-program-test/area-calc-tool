@@ -1,43 +1,38 @@
-# 單一畫布 v4：WebSocket 與框選修正
+# Fabric.js + GPT 逐房間辨識版
 
-## WebSocket 修正
+## 核心改變
 
-上一版將整張底圖轉成 base64，並存入 `st.session_state.drawing`。
-每次拖曳框線時，Streamlit 都可能透過 WebSocket 重送大型 JSON，
-造成：
+### 不再使用 streamlit-drawable-canvas
+
+改用自訂 Fabric.js Streamlit Component。
+拖曳、拉伸、改色、刪除與復原都在瀏覽器內執行，
+只有按「套用修改」時才把框線 JSON 傳回 Python。
+
+因此可避免：
+
+- 每次拖曳觸發 Streamlit rerun
+- 框線閃爍
+- Cached ForwardMsg MISS
+- 底圖反覆載入或消失
+
+### GPT 每張圖完整判讀
 
 ```text
-Cached ForwardMsg MISS
-框線閃爍
-Connection error
+完整平面圖
+→ GPT 辨識房間名稱與粗略 bbox
+→ 每個房間局部裁切
+→ GPT 再次判斷內牆 polygon
+→ 幾何驗證
+→ Fabric.js 人工修正
 ```
 
-本版改為：
+## 更新檔案
 
 ```text
-background_image = 壓縮 JPEG PIL 圖片
-session_state = 只保存小型 polygon JSON
-```
-
-底圖不再進入 session_state，也不再反覆回傳 base64。
-
-## 框選修正
-
-GPT 不再直接輸出 polygon，只輸出：
-
-```text
-空間名稱
-空間類型
-大致 bbox
-```
-
-再由 OpenCV 以 bbox 中心作 seed，在局部範圍尋找封閉空白區域並轉成 polygon。
-
-若局部分割失敗，使用 GPT bbox 作可編輯矩形，而不是接受 GPT 產生的巨大錯誤 polygon。
-
-## 版本
-
-```text
-streamlit==1.49.1
-streamlit-drawable-canvas-fix==0.9.8
+app.py
+openai_room_detector.py
+floorplan_editor.py
+frontend/index.html
+requirements.txt
+README.md
 ```
