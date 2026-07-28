@@ -1,38 +1,71 @@
-# Fabric.js + GPT 逐房間辨識版
+# 平面圖框選 v1.1：加入裁切與座標回推
 
-## 核心改變
+這版不是大幅重寫，而是在上一版補回兩個必要步驟：
 
-### 不再使用 streamlit-drawable-canvas
+1. **先找建築主體並裁切**
+2. **保留 Canvas 與原圖兩套座標**
 
-改用自訂 Fabric.js Streamlit Component。
-拖曳、拉伸、改色、刪除與復原都在瀏覽器內執行，
-只有按「套用修改」時才把框線 JSON 傳回 Python。
-
-因此可避免：
-
-- 每次拖曳觸發 Streamlit rerun
-- 框線閃爍
-- Cached ForwardMsg MISS
-- 底圖反覆載入或消失
-
-### GPT 每張圖完整判讀
+## 實際流程
 
 ```text
-完整平面圖
-→ GPT 辨識房間名稱與粗略 bbox
-→ 每個房間局部裁切
-→ GPT 再次判斷內牆 polygon
-→ 幾何驗證
-→ Fabric.js 人工修正
+PDF / 圖片
+↓
+300 DPI 轉圖
+↓
+OpenAI 第一次呼叫：找建築主體 bbox
+↓
+回推成原圖 crop_box
+↓
+裁切建築主體
+↓
+等比例放大到 1166 × 1200 固定畫布
+↓
+OpenAI 第二次呼叫：框主要室內空間
+↓
+相對 bbox 轉 Canvas Polygon
+↓
+Canvas Polygon 回推原圖座標
+↓
+送入既有 floorplan_editor
 ```
 
-## 更新檔案
+## 替換方式
 
-```text
-app.py
-openai_room_detector.py
-floorplan_editor.py
-frontend/index.html
-requirements.txt
-README.md
+將以下兩個檔案放入原專案：
+
+- `room_bbox_detector.py`
+- `app_bbox_example.py`
+
+保留你目前的：
+
+- `floorplan_editor.py`
+
+執行：
+
+```bash
+streamlit run app_bbox_example.py
 ```
+
+## 輸出座標
+
+每一個 room 會同時包含：
+
+```python
+{
+    "points": [...],           # 1166 × 1200 Canvas 座標
+    "original_points": [...]   # 原始 PDF Render 圖片座標
+}
+```
+
+`points` 用在頁面編輯器。
+
+`original_points` 用在最後輸出 PDF 疊圖。
+
+## 注意
+
+這版使用兩次 OpenAI 影像呼叫：
+
+- 第一次只找建築主體，用於裁切。
+- 第二次只分析裁切後的建築圖，用於房間框選。
+
+這比把整張基地圖直接縮小後一次辨識，更接近先前人工框選流程。
