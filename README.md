@@ -1,29 +1,52 @@
-# AI 直接畫框測試版
+# OpenAI 平面圖原始判讀測試
 
-此版本的目的，是測試以下流程：
+這個版本只測試 OpenAI 對平面圖的原始理解能力。
+
+## 流程
 
 ```text
-上傳平面圖
-→ 將完整圖面交給 OpenAI Images Edit API
-→ 要求 AI 保留原圖，只增加純紅色封閉空間框
-→ Python 擷取紅色線
-→ 轉成 Polygon
-→ 將 Polygon 疊回原始圖面
+上傳 PDF／圖片
+→ PDF 第一頁轉圖片
+→ 圖片直接送入 OpenAI Responses API
+→ 顯示 output_text
+→ 顯示完整 API Response JSON
 ```
 
-## 檔案
+本版不執行：
+
+- 自動框線
+- Polygon
+- BBox
+- OpenCV
+- 裁切
+- 座標轉換
+- 面積計算
+- 結果過濾
+- Reviewer
+
+目的在於確認模型到底能否正確理解：
+
+- 圖面有哪些室內空間
+- 各空間的位置與邊界
+- 哪些是樓梯、設備、家具或室外空間
+- 哪些區域容易誤判
+
+## GitHub 最終檔案
+
+只需上傳：
 
 - `app.py`
-- `ai_image_annotator.py`
-- `red_line_extractor.py`
 - `requirements.txt`
+- `README.md`
 
 ## Streamlit Cloud Secrets
 
 ```toml
-OPENAI_API_KEY = "你的 API Key"
-OPENAI_IMAGE_MODEL = "gpt-image-1"
+OPENAI_API_KEY = "你的實際 API Key"
+OPENAI_VISION_MODEL = "gpt-4.1"
 ```
+
+`OPENAI_VISION_MODEL` 可不設定，程式頁面中也可以自行輸入模型名稱。
 
 ## 執行
 
@@ -32,14 +55,15 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## 重要限制
+## 測試方式
 
-這是實驗流程。圖像生成／編輯模型可能重新繪製原圖中的線條、文字或尺寸，
-即使 Prompt 要求保持不變，也不能保證像素完全一致。
-
-因此頁面同時顯示：
-
-1. OpenAI 回傳的編輯圖。
-2. Python 從紅線擷取後，重新疊回原始圖的結果。
-
-應以第二張圖判斷紅線擷取是否可用。
+1. 上傳原本的平面圖。
+2. 使用預設 Prompt 執行一次。
+3. 儲存：
+   - 原始文字回覆
+   - 完整 API Response JSON
+4. 根據模型實際描述，再決定下一步適合：
+   - 回傳語意定位
+   - 回傳粗略區域
+   - 結合牆角搜尋
+   - 或停止使用純 Vision 座標方案
