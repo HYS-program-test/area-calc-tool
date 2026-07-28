@@ -7,361 +7,258 @@ from typing import Any
 import streamlit.components.v1 as components
 
 
-_FRONTEND_HTML = r"""
+_HTML = r"""
 <!doctype html>
-<html>
+<html lang="zh-Hant">
 <head>
-  <meta charset="utf-8" />
-  <script src="https://cdn.jsdelivr.net/npm/fabric@5.3.0/dist/fabric.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/streamlit-component-lib@2.0.0/dist/index.js"></script>
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      font-family: sans-serif;
-      background: #fff;
-    }
-
-    .toolbar {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      align-items: center;
-      padding: 8px 0;
-    }
-
-    button,
-    input[type="color"] {
-      min-height: 36px;
-      border: 1px solid #cbd5e1;
-      border-radius: 8px;
-      background: white;
-      padding: 6px 12px;
-      cursor: pointer;
-    }
-
-    button.primary {
-      background: #2563eb;
-      color: white;
-      border-color: #2563eb;
-    }
-
-    .status {
-      color: #475569;
-      font-size: 13px;
-      margin-left: auto;
-    }
-
-    .canvas-wrap {
-      border: 1px solid #cbd5e1;
-      overflow: auto;
-      background: #fff;
-    }
-
-    canvas {
-      display: block;
-    }
-  </style>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; background:#fff; font-family:Arial,sans-serif; }
+  #toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:8px 0; }
+  button, input { min-height:36px; border:1px solid #cbd5e1; border-radius:8px; background:#fff; padding:6px 12px; }
+  button { cursor:pointer; }
+  button.primary { background:#2563eb; color:#fff; border-color:#2563eb; }
+  #status { margin-left:auto; color:#475569; font-size:13px; }
+  #wrap { border:1px solid #cbd5e1; overflow:auto; background:#fff; }
+  svg { display:block; touch-action:none; user-select:none; }
+  .room { fill:transparent; stroke-width:3; vector-effect:non-scaling-stroke; cursor:move; }
+  .room.selected { stroke-width:5; }
+  .handle { fill:#fff; stroke:#111827; stroke-width:1.5; cursor:crosshair; }
+</style>
 </head>
 <body>
-  <div class="toolbar">
-    <input id="color" type="color" value="#3B82F6" aria-label="框線顏色" />
-    <button id="applyColor">套用顏色</button>
-    <button id="delete">刪除選取</button>
-    <button id="undo">復原</button>
-    <button id="save" class="primary">套用修改</button>
-    <span id="status" class="status">尚未修改</span>
-  </div>
+<div id="toolbar">
+  <input id="color" type="color" value="#3B82F6">
+  <button id="applyColor">套用顏色</button>
+  <button id="delete">刪除選取</button>
+  <button id="undo">復原</button>
+  <button id="save" class="primary">套用修改</button>
+  <span id="status">載入中</span>
+</div>
+<div id="wrap"><svg id="editor"></svg></div>
 
-  <div class="canvas-wrap">
-    <canvas id="canvas"></canvas>
-  </div>
+<script>
+(() => {
+  const svg = document.getElementById("editor");
+  const NS = "http://www.w3.org/2000/svg";
+  let args = null;
+  let rooms = [];
+  let selectedIndex = -1;
+  let dragMode = null;
+  let dragStart = null;
+  let originalPoints = null;
+  let activeVertex = -1;
+  let history = [];
 
-  <script>
-    const Streamlit = window.Streamlit;
-    const canvas = new fabric.Canvas("canvas", {
-      selection: true,
-      preserveObjectStacking: true
+  function send(type, data={}) {
+    window.parent.postMessage({isStreamlitMessage:true, type, ...data}, "*");
+  }
+
+  function ready() {
+    send("streamlit:componentReady", {apiVersion:1});
+  }
+
+  function setHeight() {
+    send("streamlit:setFrameHeight", {height:document.body.scrollHeight + 8});
+  }
+
+  function setValue(value) {
+    send("streamlit:setComponentValue", {value});
+  }
+
+  function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function pushHistory() {
+    history.push(clone(rooms));
+    if (history.length > 30) history.shift();
+    document.getElementById("status").textContent = "有尚未套用的修改";
+  }
+
+  function pointString(points) {
+    return points.map(p => `${p[0]},${p[1]}`).join(" ");
+  }
+
+  function clearSelection() {
+    selectedIndex = -1;
+    render();
+  }
+
+  function selectRoom(index) {
+    selectedIndex = index;
+    render();
+  }
+
+  function svgPoint(event) {
+    const rect = svg.getBoundingClientRect();
+    const scaleX = Number(args.width) / rect.width;
+    const scaleY = Number(args.height) / rect.height;
+    return [
+      (event.clientX - rect.left) * scaleX,
+      (event.clientY - rect.top) * scaleY
+    ];
+  }
+
+  function render() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    svg.setAttribute("width", args.width);
+    svg.setAttribute("height", args.height);
+    svg.setAttribute("viewBox", `0 0 ${args.width} ${args.height}`);
+
+    const image = document.createElementNS(NS, "image");
+    image.setAttribute("href", args.image_data_url);
+    image.setAttribute("x", "0");
+    image.setAttribute("y", "0");
+    image.setAttribute("width", args.width);
+    image.setAttribute("height", args.height);
+    image.setAttribute("preserveAspectRatio", "none");
+    image.style.pointerEvents = "none";
+    svg.appendChild(image);
+
+    rooms.forEach((room, index) => {
+      const polygon = document.createElementNS(NS, "polygon");
+      polygon.setAttribute("points", pointString(room.points || []));
+      polygon.setAttribute("stroke", room.color || "#ff6347");
+      polygon.setAttribute("class", index === selectedIndex ? "room selected" : "room");
+      polygon.dataset.index = String(index);
+
+      polygon.addEventListener("pointerdown", event => {
+        event.stopPropagation();
+        selectedIndex = index;
+        dragMode = "move";
+        dragStart = svgPoint(event);
+        originalPoints = clone(rooms[index].points);
+        svg.setPointerCapture(event.pointerId);
+        render();
+      });
+
+      svg.appendChild(polygon);
+
+      if (index === selectedIndex) {
+        (room.points || []).forEach((point, vertexIndex) => {
+          const handle = document.createElementNS(NS, "circle");
+          handle.setAttribute("cx", point[0]);
+          handle.setAttribute("cy", point[1]);
+          handle.setAttribute("r", "7");
+          handle.setAttribute("class", "handle");
+
+          handle.addEventListener("pointerdown", event => {
+            event.stopPropagation();
+            dragMode = "vertex";
+            activeVertex = vertexIndex;
+            dragStart = svgPoint(event);
+            originalPoints = clone(rooms[index].points);
+            svg.setPointerCapture(event.pointerId);
+          });
+
+          svg.appendChild(handle);
+        });
+      }
     });
 
-    let history = [];
-    let isRestoring = false;
-    let initialized = false;
+    setHeight();
+  }
 
-    function setFrameHeight() {
-      Streamlit.setFrameHeight(document.body.scrollHeight + 8);
+  svg.addEventListener("pointerdown", event => {
+    if (event.target === svg || event.target.tagName === "image") {
+      clearSelection();
+    }
+  });
+
+  svg.addEventListener("pointermove", event => {
+    if (selectedIndex < 0 || !dragMode || !dragStart || !originalPoints) return;
+
+    const current = svgPoint(event);
+    const dx = current[0] - dragStart[0];
+    const dy = current[1] - dragStart[1];
+
+    if (dragMode === "move") {
+      rooms[selectedIndex].points = originalPoints.map(p => [
+        Math.max(0, Math.min(Number(args.width), p[0] + dx)),
+        Math.max(0, Math.min(Number(args.height), p[1] + dy))
+      ]);
+    } else if (dragMode === "vertex" && activeVertex >= 0) {
+      rooms[selectedIndex].points = clone(originalPoints);
+      rooms[selectedIndex].points[activeVertex] = [
+        Math.max(0, Math.min(Number(args.width), current[0])),
+        Math.max(0, Math.min(Number(args.height), current[1]))
+      ];
     }
 
-    function saveHistory() {
-      if (isRestoring) return;
+    render();
+  });
 
-      history.push(
-        JSON.stringify(
-          canvas.toJSON([
-            "room_id",
-            "room_name",
-            "room_type",
-            "confidence",
-            "include_in_area",
-            "source"
-          ])
-        )
-      );
+  svg.addEventListener("pointerup", () => {
+    if (dragMode) pushHistory();
+    dragMode = null;
+    dragStart = null;
+    originalPoints = null;
+    activeVertex = -1;
+  });
 
-      if (history.length > 30) {
-        history.shift();
-      }
+  document.getElementById("applyColor").addEventListener("click", () => {
+    if (selectedIndex < 0) return;
+    rooms[selectedIndex].color = document.getElementById("color").value;
+    pushHistory();
+    render();
+  });
 
-      document.getElementById("status").textContent =
-        "有尚未套用的修改";
-    }
+  document.getElementById("delete").addEventListener("click", () => {
+    if (selectedIndex < 0) return;
+    rooms.splice(selectedIndex, 1);
+    selectedIndex = -1;
+    pushHistory();
+    render();
+  });
 
-    function createRoomObject(room) {
-      const points = (room.points || []).map(point => ({
-        x: Number(point[0]),
-        y: Number(point[1])
-      }));
+  document.getElementById("undo").addEventListener("click", () => {
+    if (history.length <= 1) return;
+    history.pop();
+    rooms = clone(history[history.length - 1]);
+    selectedIndex = -1;
+    document.getElementById("status").textContent = "已復原，尚未套用";
+    render();
+  });
 
-      return new fabric.Polygon(points, {
-        fill: "rgba(0,0,0,0)",
-        stroke: room.color || "#ff6347",
-        strokeWidth: 3,
-        strokeUniform: true,
-        objectCaching: false,
-        transparentCorners: false,
-        cornerStyle: "circle",
-        cornerColor: "#ffffff",
-        cornerStrokeColor: room.color || "#ff6347",
-        room_id: room.room_id || "",
-        room_name: room.room_name || "",
-        room_type: room.room_type || "",
-        confidence: room.confidence ?? null,
-        include_in_area: room.include_in_area !== false,
-        source: room.source || "openai"
-      });
-    }
+  document.getElementById("save").addEventListener("click", () => {
+    setValue({rooms: clone(rooms)});
+    document.getElementById("status").textContent = "修改已套用";
+  });
 
-    function extractPoints(object) {
-      const matrix = object.calcTransformMatrix();
+  window.addEventListener("message", event => {
+    const data = event.data;
+    if (!data || data.type !== "streamlit:render") return;
 
-      return object.points.map(point => {
-        const localPoint = new fabric.Point(
-          point.x - object.pathOffset.x,
-          point.y - object.pathOffset.y
-        );
+    args = data.args;
+    rooms = clone(args.rooms || []);
+    selectedIndex = -1;
+    history = [clone(rooms)];
+    document.getElementById("status").textContent = "可拖曳框線；拖曳頂點可調整形狀";
+    render();
+  });
 
-        const globalPoint =
-          fabric.util.transformPoint(localPoint, matrix);
-
-        return [globalPoint.x, globalPoint.y];
-      });
-    }
-
-    function serializeRooms() {
-      return canvas
-        .getObjects()
-        .filter(object => object.type === "polygon")
-        .map(object => ({
-          room_id: object.room_id || "",
-          room_name: object.room_name || "",
-          room_type: object.room_type || "",
-          confidence: object.confidence ?? null,
-          include_in_area: object.include_in_area !== false,
-          source: object.source || "manual",
-          color: object.stroke || "#ff6347",
-          points: extractPoints(object)
-        }));
-    }
-
-    function loadEditor(args) {
-      const width = Number(args.width);
-      const height = Number(args.height);
-
-      canvas.setWidth(width);
-      canvas.setHeight(height);
-      canvas.clear();
-
-      fabric.Image.fromURL(
-        args.image_data_url,
-        image => {
-          image.set({
-            left: 0,
-            top: 0,
-            selectable: false,
-            evented: false,
-            hoverCursor: "default"
-          });
-
-          canvas.add(image);
-          canvas.sendToBack(image);
-
-          (args.rooms || []).forEach(room => {
-            canvas.add(createRoomObject(room));
-          });
-
-          canvas.renderAll();
-
-          history = [
-            JSON.stringify(
-              canvas.toJSON([
-                "room_id",
-                "room_name",
-                "room_type",
-                "confidence",
-                "include_in_area",
-                "source"
-              ])
-            )
-          ];
-
-          initialized = true;
-          document.getElementById("status").textContent =
-            "可拖曳、拉伸、刪除";
-          setFrameHeight();
-        },
-        { crossOrigin: "anonymous" }
-      );
-    }
-
-    canvas.on("object:modified", saveHistory);
-
-    document
-      .getElementById("applyColor")
-      .addEventListener("click", () => {
-        const object = canvas.getActiveObject();
-
-        if (!object || object.type !== "polygon") {
-          return;
-        }
-
-        const color =
-          document.getElementById("color").value;
-
-        object.set({
-          stroke: color,
-          cornerStrokeColor: color
-        });
-
-        canvas.requestRenderAll();
-        saveHistory();
-      });
-
-    document
-      .getElementById("delete")
-      .addEventListener("click", () => {
-        const activeObjects = canvas.getActiveObjects();
-
-        if (!activeObjects.length) {
-          return;
-        }
-
-        activeObjects.forEach(object => {
-          if (object.type === "polygon") {
-            canvas.remove(object);
-          }
-        });
-
-        canvas.discardActiveObject();
-        canvas.requestRenderAll();
-        saveHistory();
-      });
-
-    document
-      .getElementById("undo")
-      .addEventListener("click", () => {
-        if (history.length <= 1) {
-          return;
-        }
-
-        history.pop();
-        const previous = history[history.length - 1];
-
-        isRestoring = true;
-
-        canvas.loadFromJSON(previous, () => {
-          canvas.getObjects().forEach(object => {
-            if (object.type === "image") {
-              object.set({
-                selectable: false,
-                evented: false
-              });
-              canvas.sendToBack(object);
-            }
-          });
-
-          canvas.renderAll();
-          isRestoring = false;
-
-          document.getElementById("status").textContent =
-            "已復原，尚未套用";
-        });
-      });
-
-    document
-      .getElementById("save")
-      .addEventListener("click", () => {
-        Streamlit.setComponentValue({
-          rooms: serializeRooms()
-        });
-
-        document.getElementById("status").textContent =
-          "修改已套用";
-      });
-
-    Streamlit.events.addEventListener(
-      Streamlit.RENDER_EVENT,
-      event => {
-        const args = event.detail.args;
-
-        if (!initialized) {
-          loadEditor(args);
-        }
-      }
-    );
-
-    Streamlit.setComponentReady();
-    setFrameHeight();
-  </script>
+  ready();
+  setHeight();
+})();
+</script>
 </body>
 </html>
 """
 
 
-def _prepare_component_directory() -> Path:
-    """建立執行階段前端資料夾。
+def _component_dir() -> Path:
+    directory = Path(tempfile.gettempdir()) / "floorplan_svg_editor_component"
+    directory.mkdir(parents=True, exist_ok=True)
+    index = directory / "index.html"
+    index.write_text(_HTML, encoding="utf-8")
+    return directory
 
-    不再依賴 GitHub 中一定要存在 frontend/index.html，
-    可避免 Streamlit Cloud 因資料夾遺漏而啟動失敗。
-    """
-    component_dir = (
-        Path(tempfile.gettempdir())
-        / "floorplan_fabric_editor_component"
-    )
-    component_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    index_file = component_dir / "index.html"
-
-    if (
-        not index_file.exists()
-        or index_file.read_text(encoding="utf-8")
-        != _FRONTEND_HTML
-    ):
-        index_file.write_text(
-            _FRONTEND_HTML,
-            encoding="utf-8",
-        )
-
-    return component_dir
-
-
-_COMPONENT_DIRECTORY = _prepare_component_directory()
 
 _COMPONENT = components.declare_component(
-    "floorplan_fabric_editor",
-    path=str(_COMPONENT_DIRECTORY),
+    "floorplan_svg_editor",
+    path=str(_component_dir()),
 )
 
 
