@@ -9,7 +9,7 @@ from typing import Literal
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 
 DEFAULT_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1")
@@ -57,42 +57,43 @@ class ReviewResult(BaseModel):
 INITIAL_PROMPT = """
 你是一位建築平面圖空間判讀人員。
 
-你看到的是「已裁切的建築主體」，圖片上覆蓋 0～1000 的標準化座標格線。
-請產生主要室內使用空間的初始 Polygon。
+輸入圖片已經是正確的建築主體範圍，不需要再裁切。
+圖片上覆蓋 0～1000 的標準化座標格線。
 
 座標規則：
-1. 所有 x、y 都使用 0～1000 的標準化座標。
-2. 左上角是 (0,0)，右下角是 (1000,1000)。
-3. 不要使用圖片像素座標。
-4. 請參照格線與邊界標籤定位。
+1. 所有 x、y 使用 0～1000 標準化座標。
+2. 左上角為 (0,0)，右下角為 (1000,1000)。
+3. 不使用實際像素座標。
+4. 參照格線與數字標籤定位。
 
 空間規則：
 1. 框完整房間或完整開放式使用空間。
-2. 不框床、桌椅、沙發、櫃體、流理台、洗手台、馬桶、樓梯踏階、電梯設備、門片、窗戶、尺寸線、文字、陽台、庭院、車道或建築外部。
+2. 不框家具、櫃體、樓梯踏階、電梯設備、門片、窗戶、尺寸線、文字、陽台、庭院、車道或建築外部。
 3. 開放式客廳、餐廳、廚房若沒有完整隔牆，視為同一空間。
 4. 有完整隔牆的臥室、衛浴、儲藏室分別框選。
-5. Polygon 應沿牆內側主要轉折，不得跨越實牆。
-6. L 型空間要使用 L 型 Polygon。
-7. 每個空間至少 4 個角點，按順時針或逆時針排列。
-8. 不確定時降低 confidence，不要假裝精確。
+5. Polygon 沿牆內側主要轉折，不得跨越實牆。
+6. L 型空間使用 L 型 Polygon。
+7. 每個空間至少 4 個角點，依順時針或逆時針排列。
+8. 不要把圖片外框當成房間牆線。
+9. 不確定時降低 confidence。
 """
 
 
 REVIEW_PROMPT = """
-你正在執行「視覺修正」，不是重新產生全部房間。
+你正在執行視覺修正，不是重新產生全部房間。
 
-你會看到：
-1. 裁切後的原始平面圖與 0～1000 座標格線。
+你會同時看到：
+1. 加上 0～1000 格線的原始建築圖。
 2. 已畫上紅色 Polygon 與藍色角點編號的疊圖。
 
-請逐一檢查：
-- 是否框到家具、設備、樓梯、電梯、尺寸線或室外區域。
-- 是否穿過牆體。
+請檢查：
+- 是否框到家具、設備、樓梯、電梯、尺寸線或室外。
+- 是否穿過牆。
 - 是否漏掉主要轉折。
 - 是否應刪除。
-- 名稱是否合理。
+- 房間名稱是否合理。
 
-你只能回傳：
+只能回傳：
 - approve
 - move_point
 - add_point
@@ -100,12 +101,12 @@ REVIEW_PROMPT = """
 - delete_room
 - rename_room
 
-重要：
-1. 不要重新輸出完整 Polygon。
+規則：
+1. 不重新輸出完整 Polygon。
 2. 每次只修正最明顯、最必要的錯誤。
-3. 所有位置仍使用 0～1000 標準化座標。
-4. 若全部合理，overall_status=approved。
-5. 若仍需修正，overall_status=revise。
+3. 所有座標維持 0～1000。
+4. 全部合理時 overall_status=approved。
+5. 尚需修正時 overall_status=revise。
 
 目前房間 JSON：
 {rooms_json}
@@ -126,15 +127,10 @@ def clamp_norm(value: float) -> float:
 
 
 def norm_to_pixel(point: list[float], width: int, height: int) -> tuple[float, float]:
-    x = point[0] / NORMALIZED_MAX * max(width - 1, 1)
-    y = point[1] / NORMALIZED_MAX * max(height - 1, 1)
-    return x, y
-
-
-def pixel_to_norm(x: float, y: float, width: int, height: int) -> list[float]:
-    nx = x / max(width - 1, 1) * NORMALIZED_MAX
-    ny = y / max(height - 1, 1) * NORMALIZED_MAX
-    return [clamp_norm(nx), clamp_norm(ny)]
+    return (
+        point[0] / NORMALIZED_MAX * max(width - 1, 1),
+        point[1] / NORMALIZED_MAX * max(height - 1, 1),
+    )
 
 
 def add_normalized_grid(image: Image.Image, step: int = 100) -> Image.Image:
@@ -145,17 +141,16 @@ def add_normalized_grid(image: Image.Image, step: int = 100) -> Image.Image:
     for value in range(0, 1001, step):
         x = round(value / 1000 * (width - 1))
         y = round(value / 1000 * (height - 1))
-
-        line_alpha = 120 if value % 500 == 0 else 65
+        alpha = 115 if value % 500 == 0 else 55
         line_width = 2 if value % 500 == 0 else 1
 
-        draw.line((x, 0, x, height), fill=(0, 90, 255, line_alpha), width=line_width)
-        draw.line((0, y, width, y), fill=(0, 90, 255, line_alpha), width=line_width)
+        draw.line((x, 0, x, height - 1), fill=(0, 90, 255, alpha), width=line_width)
+        draw.line((0, y, width - 1, y), fill=(0, 90, 255, alpha), width=line_width)
 
-        draw.rectangle((x, 0, min(x + 38, width), 18), fill=(255, 255, 255, 210))
+        draw.rectangle((x, 0, min(x + 40, width - 1), 18), fill=(255, 255, 255, 220))
         draw.text((x + 2, 2), str(value), fill=(0, 70, 200, 255))
 
-        draw.rectangle((0, y, 42, min(y + 18, height)), fill=(255, 255, 255, 210))
+        draw.rectangle((0, y, 44, min(y + 18, height - 1)), fill=(255, 255, 255, 220))
         draw.text((2, y + 2), str(value), fill=(0, 70, 200, 255))
 
     return result
@@ -165,21 +160,17 @@ def clean_rooms(rooms: list[RoomPolygon]) -> list[dict]:
     cleaned = []
     for room in rooms:
         points = [[clamp_norm(p.x), clamp_norm(p.y)] for p in room.points]
-        if len(points) < 3:
-            continue
-        cleaned.append({
-            "id": room.id.strip(),
-            "name": room.name.strip(),
-            "points": points,
-            "confidence": float(room.confidence),
-        })
+        if len(points) >= 3:
+            cleaned.append({
+                "id": room.id.strip(),
+                "name": room.name.strip(),
+                "points": points,
+                "confidence": float(room.confidence),
+            })
     return cleaned
 
 
-def detect_initial_rooms(
-    gridded_crop: Image.Image,
-    model: str = DEFAULT_MODEL,
-) -> list[dict]:
+def detect_initial_rooms(gridded_image: Image.Image, model: str) -> list[dict]:
     client = OpenAI()
     response = client.responses.parse(
         model=model,
@@ -189,7 +180,7 @@ def detect_initial_rooms(
                 {"type": "input_text", "text": INITIAL_PROMPT},
                 {
                     "type": "input_image",
-                    "image_url": image_to_data_url(gridded_crop),
+                    "image_url": image_to_data_url(gridded_image),
                     "detail": "high",
                 },
             ],
@@ -197,24 +188,24 @@ def detect_initial_rooms(
         text_format=InitialDetection,
     )
     if response.output_parsed is None:
-        raise RuntimeError("OpenAI 未回傳可解析的初始空間資料。")
+        raise RuntimeError("OpenAI 未回傳可解析的初始 Polygon。")
     return clean_rooms(response.output_parsed.rooms)
 
 
-def draw_review_overlay(gridded_crop: Image.Image, rooms: list[dict]) -> Image.Image:
-    overlay = gridded_crop.copy().convert("RGB")
+def draw_review_overlay(gridded_image: Image.Image, rooms: list[dict]) -> Image.Image:
+    overlay = gridded_image.copy().convert("RGB")
     draw = ImageDraw.Draw(overlay, "RGBA")
     width, height = overlay.size
 
     for room in rooms:
-        pts = [norm_to_pixel(p, width, height) for p in room["points"]]
-        if len(pts) < 3:
+        points = [norm_to_pixel(point, width, height) for point in room["points"]]
+        if len(points) < 3:
             continue
 
-        draw.polygon(pts, fill=(255, 0, 0, 35))
-        draw.line(pts + [pts[0]], fill=(255, 0, 0, 255), width=5, joint="curve")
+        draw.polygon(points, fill=(255, 0, 0, 35))
+        draw.line(points + [points[0]], fill=(255, 0, 0, 255), width=5, joint="curve")
 
-        for index, (x, y) in enumerate(pts):
+        for index, (x, y) in enumerate(points):
             radius = 8
             draw.ellipse(
                 (x - radius, y - radius, x + radius, y + radius),
@@ -224,19 +215,19 @@ def draw_review_overlay(gridded_crop: Image.Image, rooms: list[dict]) -> Image.I
             )
             draw.text((x + 10, y - 10), f'{room["id"]}:{index}', fill=(0, 70, 220, 255))
 
-        x, y = pts[0]
+        x, y = points[0]
         draw.text((x + 8, y + 18), f'{room["id"]} {room["name"]}', fill=(255, 0, 0, 255))
 
     return overlay
 
 
 def request_review(
-    gridded_crop: Image.Image,
+    gridded_image: Image.Image,
     overlay_image: Image.Image,
     rooms: list[dict],
     round_index: int,
     max_rounds: int,
-    model: str = DEFAULT_MODEL,
+    model: str,
 ) -> ReviewResult:
     client = OpenAI()
     prompt = REVIEW_PROMPT.format(
@@ -253,7 +244,7 @@ def request_review(
                 {"type": "input_text", "text": prompt},
                 {
                     "type": "input_image",
-                    "image_url": image_to_data_url(gridded_crop),
+                    "image_url": image_to_data_url(gridded_image),
                     "detail": "high",
                 },
                 {
@@ -274,122 +265,88 @@ def apply_operations(rooms: list[dict], review: ReviewResult) -> list[dict]:
     result = deepcopy(rooms)
 
     def find_room(room_id: str):
-        return next((r for r in result if r["id"] == room_id), None)
+        return next((room for room in result if room["id"] == room_id), None)
 
-    for op in review.operations:
-        room = find_room(op.room_id)
+    for operation in review.operations:
+        room = find_room(operation.room_id)
 
-        if op.type == "delete_room":
-            result = [r for r in result if r["id"] != op.room_id]
+        if operation.type == "delete_room":
+            result = [r for r in result if r["id"] != operation.room_id]
             continue
 
         if room is None:
             continue
 
-        if op.type == "approve":
+        if operation.type == "approve":
             continue
 
-        if op.type == "rename_room":
-            if op.new_name:
-                room["name"] = op.new_name.strip()
+        if operation.type == "rename_room":
+            if operation.new_name:
+                room["name"] = operation.new_name.strip()
             continue
 
         points = room["points"]
 
-        if op.type == "move_point":
+        if operation.type == "move_point":
             if (
-                op.point_index is not None
-                and op.position is not None
-                and 0 <= op.point_index < len(points)
+                operation.point_index is not None
+                and operation.position is not None
+                and 0 <= operation.point_index < len(points)
             ):
-                points[op.point_index] = [
-                    clamp_norm(op.position.x),
-                    clamp_norm(op.position.y),
+                points[operation.point_index] = [
+                    clamp_norm(operation.position.x),
+                    clamp_norm(operation.position.y),
                 ]
 
-        elif op.type == "add_point":
-            if op.position is not None:
-                index = len(points) if op.point_index is None else op.point_index
+        elif operation.type == "add_point":
+            if operation.position is not None:
+                index = len(points) if operation.point_index is None else operation.point_index
                 index = max(0, min(len(points), index))
                 points.insert(index, [
-                    clamp_norm(op.position.x),
-                    clamp_norm(op.position.y),
+                    clamp_norm(operation.position.x),
+                    clamp_norm(operation.position.y),
                 ])
 
-        elif op.type == "delete_point":
+        elif operation.type == "delete_point":
             if (
-                op.point_index is not None
+                operation.point_index is not None
                 and len(points) > 3
-                and 0 <= op.point_index < len(points)
+                and 0 <= operation.point_index < len(points)
             ):
-                points.pop(op.point_index)
+                points.pop(operation.point_index)
 
     return result
 
 
-def polygon_area_pixels(points_norm: list[list[float]], width: int, height: int) -> float:
-    pts = [norm_to_pixel(p, width, height) for p in points_norm]
+def polygon_area_pixels(points: list[list[float]], width: int, height: int) -> float:
+    pixel_points = [norm_to_pixel(point, width, height) for point in points]
     total = 0.0
-    for i, (x1, y1) in enumerate(pts):
-        x2, y2 = pts[(i + 1) % len(pts)]
+    for index, (x1, y1) in enumerate(pixel_points):
+        x2, y2 = pixel_points[(index + 1) % len(pixel_points)]
         total += x1 * y2 - x2 * y1
     return abs(total) / 2.0
 
 
-def crop_norm_to_original_pixel(
-    point_norm: list[float],
-    crop_box: tuple[int, int, int, int],
-) -> list[float]:
-    left, top, right, bottom = crop_box
-    crop_width = right - left
-    crop_height = bottom - top
-    x = left + point_norm[0] / 1000 * crop_width
-    y = top + point_norm[1] / 1000 * crop_height
-    return [x, y]
-
-
-def draw_on_original(
-    original: Image.Image,
-    rooms: list[dict],
-    crop_box: tuple[int, int, int, int],
-) -> Image.Image:
-    result = original.copy().convert("RGB")
-    draw = ImageDraw.Draw(result, "RGBA")
-
-    for room in rooms:
-        pts = [tuple(crop_norm_to_original_pixel(p, crop_box)) for p in room["points"]]
-        if len(pts) < 3:
-            continue
-        draw.polygon(pts, fill=(255, 0, 0, 30))
-        draw.line(pts + [pts[0]], fill=(255, 0, 0, 255), width=5, joint="curve")
-        x, y = pts[0]
-        draw.text((x + 8, y + 8), f'{room["id"]} {room["name"]}', fill=(255, 0, 0, 255))
-
-    return result
-
-
 def run_visual_review_loop(
     original_image: Image.Image,
-    crop_box: tuple[int, int, int, int],
     model: str = DEFAULT_MODEL,
     max_rounds: int = 3,
 ) -> dict:
+    """
+    重要：此函式參數名稱固定為 original_image，
+    與 app.py 呼叫方式完全一致。
+    """
     original_image = original_image.convert("RGB")
-    left, top, right, bottom = crop_box
+    width, height = original_image.size
+    gridded_image = add_normalized_grid(original_image)
 
-    if right <= left or bottom <= top:
-        raise ValueError("裁切範圍無效。")
-
-    crop = original_image.crop(crop_box)
-    gridded_crop = add_normalized_grid(crop)
-
-    rooms = detect_initial_rooms(gridded_crop, model=model)
+    rooms = detect_initial_rooms(gridded_image, model=model)
     history = []
 
     for round_index in range(1, max_rounds + 1):
-        overlay = draw_review_overlay(gridded_crop, rooms)
+        overlay = draw_review_overlay(gridded_image, rooms)
         review = request_review(
-            gridded_crop=gridded_crop,
+            gridded_image=gridded_image,
             overlay_image=overlay,
             rooms=rooms,
             round_index=round_index,
@@ -411,27 +368,17 @@ def run_visual_review_loop(
             break
         rooms = updated
 
-    crop_width, crop_height = crop.size
     for room in rooms:
-        room["area_pixels_on_crop"] = polygon_area_pixels(
-            room["points"],
-            crop_width,
-            crop_height,
-        )
-        room["points_original_pixels"] = [
-            crop_norm_to_original_pixel(p, crop_box)
-            for p in room["points"]
+        room["area_pixels"] = polygon_area_pixels(room["points"], width, height)
+        room["points_pixels"] = [
+            list(norm_to_pixel(point, width, height))
+            for point in room["points"]
         ]
-
-    final_crop_overlay = draw_review_overlay(gridded_crop, rooms)
-    final_original_overlay = draw_on_original(original_image, rooms, crop_box)
 
     return {
         "rooms": rooms,
         "history": history,
-        "crop_box": list(crop_box),
-        "crop_size": list(crop.size),
-        "gridded_crop": gridded_crop,
-        "final_crop_overlay": final_crop_overlay,
-        "final_original_overlay": final_original_overlay,
+        "gridded_image": gridded_image,
+        "final_overlay": draw_review_overlay(gridded_image, rooms),
+        "image_size": [width, height],
     }
