@@ -1,69 +1,45 @@
-# OpenAI Direct Floorplan Analyzer
+# AI 直接畫框測試版
 
-這版只聚焦在一條路：
+此版本的目的，是測試以下流程：
 
 ```text
-上傳 PDF／圖片
-→ PDF 第一頁轉成高解析度圖片
-→ 完整圖片直接交給 OpenAI Vision API
-→ OpenAI 回傳空間 Polygon 與比例資訊
-→ Python 畫框並計算面積
+上傳平面圖
+→ 將完整圖面交給 OpenAI Images Edit API
+→ 要求 AI 保留原圖，只增加純紅色封閉空間框
+→ Python 擷取紅色線
+→ 轉成 Polygon
+→ 將 Polygon 疊回原始圖面
 ```
-
-沒有使用：
-
-- OpenCV 牆線偵測
-- 自動裁切 Agent
-- BBox 過濾流程
-- 多次空間盤點
-- Reviewer Agent
-- 固定房間座標
 
 ## 檔案
 
-- `app_openai_direct.py`
-- `openai_floorplan_analyzer.py`
+- `app.py`
+- `ai_image_annotator.py`
+- `red_line_extractor.py`
 - `requirements.txt`
-
-## 安裝
-
-```bash
-pip install -r requirements.txt
-```
 
 ## Streamlit Cloud Secrets
 
 ```toml
 OPENAI_API_KEY = "你的 API Key"
-OPENAI_VISION_MODEL = "gpt-4.1"
+OPENAI_IMAGE_MODEL = "gpt-image-1"
 ```
 
 ## 執行
 
 ```bash
-streamlit run app_openai_direct.py
+pip install -r requirements.txt
+streamlit run app.py
 ```
 
-## 座標設計
+## 重要限制
 
-送入 OpenAI 的圖片與頁面顯示底圖使用同一個尺寸，因此：
+這是實驗流程。圖像生成／編輯模型可能重新繪製原圖中的線條、文字或尺寸，
+即使 Prompt 要求保持不變，也不能保證像素完全一致。
 
-- OpenAI 回傳的 Polygon 是圖片實際像素座標。
-- 不需要 crop 座標轉換。
-- 不需要 0~1000 正規化座標。
-- 不需要回推原圖座標。
+因此頁面同時顯示：
 
-## 面積
+1. OpenAI 回傳的編輯圖。
+2. Python 從紅線擷取後，重新疊回原始圖的結果。
 
-OpenAI 負責：
-
-- 判斷空間
-- 回傳 Polygon
-- 嘗試辨識一條圖面尺寸
-
-Python 負責：
-
-- 使用 Shoelace Formula 計算 Polygon 像素面積
-- 依 `pixels_per_meter` 換算平方公尺
-
-若 OpenAI 無法可靠辨識比例尺，程式不會猜測平方公尺，只顯示像素面積。
+應以第二張圖判斷紅線擷取是否可用。

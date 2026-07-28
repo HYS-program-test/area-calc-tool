@@ -2,3 +2,5 @@ streamlit>=1.40
 openai>=1.40
 Pillow>=10.0
 PyMuPDF>=1.24
+opencv-python-headless>=4.10
+numpy>=1.26
