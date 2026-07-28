@@ -10,16 +10,18 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-from visual_review_loop import run_visual_review_loop
+from two_stage_room_analyzer import run_two_stage_analysis
 
 
 st.set_page_config(
-    page_title="平面圖 AI 視覺修正迴圈",
+    page_title="平面圖兩階段 AI 房間辨識",
     layout="wide",
 )
 
-st.title("平面圖 AI 視覺修正迴圈")
-st.caption("保留建築主體，只修正比例與座標系統。")
+st.title("平面圖兩階段 AI 房間辨識")
+st.caption(
+    "第一階段只辨識房間與大致位置；第二階段逐房間局部放大並產生 Polygon。"
+)
 
 
 def render_pdf_first_page(
@@ -57,23 +59,20 @@ def read_uploaded_file(uploaded_file) -> Image.Image:
     if suffix == ".pdf":
         return render_pdf_first_page(content)
 
-    return Image.open(
-        io.BytesIO(content)
-    ).convert("RGB")
+    return Image.open(io.BytesIO(content)).convert("RGB")
 
 
-def crop_to_building_content(
+def crop_to_content(
     image: Image.Image,
     white_threshold: int = 246,
     padding_ratio: float = 0.025,
 ) -> Image.Image:
     """
-    只移除頁面四周大面積空白，不加入上下左右界控制，
-    也不改變建築本體比例。
+    僅移除頁面外圍大片空白，不改變建築本體比例。
     """
     rgb = np.asarray(image.convert("RGB"))
-    content_mask = np.any(rgb < white_threshold, axis=2)
-    ys, xs = np.where(content_mask)
+    mask = np.any(rgb < white_threshold, axis=2)
+    ys, xs = np.where(mask)
 
     if len(xs) == 0 or len(ys) == 0:
         return image
@@ -84,18 +83,15 @@ def crop_to_building_content(
     y1 = int(ys.max()) + 1
 
     width, height = image.size
-    padding = max(8, round(min(width, height) * padding_ratio))
+    padding = max(
+        8,
+        round(min(width, height) * padding_ratio),
+    )
 
     x0 = max(0, x0 - padding)
     y0 = max(0, y0 - padding)
     x1 = min(width, x1 + padding)
     y1 = min(height, y1 + padding)
-
-    # 如果偵測結果幾乎等於整張圖，就保留原圖，避免錯誤裁切。
-    crop_width = x1 - x0
-    crop_height = y1 - y0
-    if crop_width >= width * 0.97 and crop_height >= height * 0.97:
-        return image
 
     return image.crop((x0, y0, x1, y1))
 
@@ -110,6 +106,7 @@ def resize_working_image(
         return image
 
     scale = max_side / longest
+
     return image.resize(
         (
             max(1, round(image.width * scale)),
@@ -139,38 +136,44 @@ with st.sidebar:
         value=2048,
     )
 
-    max_rounds = st.slider(
-        "最多修正輪數",
-        min_value=1,
-        max_value=5,
-        value=3,
+    crop_padding = st.slider(
+        "局部房間裁切留白比例",
+        min_value=0.05,
+        max_value=0.35,
+        value=0.18,
+        step=0.01,
+    )
+
+    local_review_rounds = st.slider(
+        "每個房間最多修正輪數",
+        min_value=0,
+        max_value=3,
+        value=1,
     )
 
 
 if uploaded_file is not None:
     try:
         page_image = read_uploaded_file(uploaded_file)
-
-        # 只移除四周空白；介面、API、Polygon 全部使用同一張 building_image。
-        building_image = crop_to_building_content(page_image)
+        building_image = crop_to_content(page_image)
         building_image = resize_working_image(
             building_image,
             max_side=max_side,
         )
 
         st.write(
-            f"建築主體圖片尺寸："
+            f"建築主體尺寸："
             f"{building_image.width} × {building_image.height}"
         )
 
         st.image(
             building_image,
-            caption="建築物主體",
+            caption="建築主體",
             use_container_width=True,
         )
 
         if st.button(
-            "執行 AI 視覺修正迴圈",
+            "執行兩階段 AI 分析",
             type="primary",
             use_container_width=True,
         ):
@@ -179,65 +182,94 @@ if uploaded_file is not None:
                 st.stop()
 
             with st.spinner(
-                "AI 正在使用標準化座標進行框選與修正……"
+                "AI 正在辨識房間、逐房間裁切並產生 Polygon……"
             ):
-                # 使用位置參數，避免 original_image 關鍵字名稱不一致。
-                result = run_visual_review_loop(
+                result = run_two_stage_analysis(
                     building_image,
-                    model,
-                    max_rounds,
+                    model=model,
+                    crop_padding_ratio=crop_padding,
+                    local_review_rounds=local_review_rounds,
                 )
 
-            st.session_state["review_result"] = {
+            st.session_state["two_stage_result"] = {
                 "rooms": result["rooms"],
-                "history": result["history"],
-                "image_size": result.get(
-                    "image_size",
-                    [
-                        building_image.width,
-                        building_image.height,
-                    ],
-                ),
+                "stage1_candidates": result[
+                    "stage1_candidates"
+                ],
+                "logs": result["logs"],
+                "image_size": result["image_size"],
             }
 
-            st.session_state["review_grid"] = result.get(
-                "gridded_image"
-            )
-
-            st.session_state["review_overlay"] = result[
+            st.session_state["stage1_overlay"] = result[
+                "stage1_overlay"
+            ]
+            st.session_state["final_overlay"] = result[
                 "final_overlay"
             ]
+            st.session_state["local_crops"] = result[
+                "local_crops"
+            ]
 
-        result_data = st.session_state.get("review_result")
-        gridded_image = st.session_state.get("review_grid")
-        overlay = st.session_state.get("review_overlay")
+        result_data = st.session_state.get(
+            "two_stage_result"
+        )
+        stage1_overlay = st.session_state.get(
+            "stage1_overlay"
+        )
+        final_overlay = st.session_state.get(
+            "final_overlay"
+        )
+        local_crops = st.session_state.get(
+            "local_crops",
+            [],
+        )
 
-        if result_data and overlay:
-            if gridded_image is not None:
-                st.subheader("AI 座標定位圖")
+        if result_data:
+            st.subheader("第一階段：房間候選位置")
+
+            if stage1_overlay is not None:
                 st.image(
-                    gridded_image,
-                    caption="建築主體＋0～1000 標準座標",
+                    stage1_overlay,
+                    caption="AI 只辨識房間名稱與大致區域",
                     use_container_width=True,
                 )
 
-            st.subheader("最終 Polygon")
-            st.image(
-                overlay,
-                caption="建築主體框選結果",
-                use_container_width=True,
-            )
+            st.subheader("第二階段：逐房間局部 Polygon")
 
-            st.subheader("空間清單")
+            if final_overlay is not None:
+                st.image(
+                    final_overlay,
+                    caption="局部分析結果合併回建築主體",
+                    use_container_width=True,
+                )
+
+            st.subheader("局部裁切檢查")
+
+            for item in local_crops:
+                with st.expander(
+                    f'{item["room_id"]}｜'
+                    f'{item["room_name"]}'
+                ):
+                    st.image(
+                        item["image"],
+                        caption=(
+                            f'局部裁切：'
+                            f'{item["crop_box"]}'
+                        ),
+                        use_container_width=True,
+                    )
+
+            st.subheader("房間清單")
+
             st.dataframe(
                 [
                     {
                         "ID": room["id"],
                         "名稱": room["name"],
-                        "角點數": len(room["points"]),
                         "信心": room["confidence"],
+                        "角點數": len(room["points"]),
                         "像素面積": round(
-                            room.get("area_pixels", 0),
+                            room["area_pixels"],
                             2,
                         ),
                     }
@@ -247,20 +279,27 @@ if uploaded_file is not None:
                 hide_index=True,
             )
 
-            with st.expander("查看最終 Polygon JSON"):
+            with st.expander("第一階段候選 JSON"):
+                st.json(
+                    result_data["stage1_candidates"]
+                )
+
+            with st.expander("最終 Polygon JSON"):
                 st.json(result_data["rooms"])
 
-            with st.expander("查看各輪修正紀錄"):
-                st.json(result_data["history"])
+            with st.expander("處理紀錄"):
+                st.json(result_data["logs"])
 
             st.download_button(
-                "下載結果 JSON",
+                "下載分析結果 JSON",
                 data=json.dumps(
                     result_data,
                     ensure_ascii=False,
                     indent=2,
                 ),
-                file_name="floorplan_review_result.json",
+                file_name=(
+                    "two_stage_floorplan_result.json"
+                ),
                 mime="application/json",
                 use_container_width=True,
             )
