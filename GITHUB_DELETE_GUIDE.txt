@@ -1,0 +1,34 @@
+GitHub 檔案處理說明
+===================
+
+本次必須覆蓋：
+1. app.py
+2. visual_review_loop.py
+3. requirements.txt
+
+目前建議保留：
+- README.md
+- floorplan_editor.py
+- geometry_utils.py
+- DEPLOY_CHECKLIST.txt
+
+目前功能未使用，可先保留但建議日後移到 archive：
+- ai_image_annotator.py
+- openai_floorplan_analyzer.py
+- openai_svg_analyzer.py
+- red_line_extractor.py
+- local_mechanics_test.json
+
+本次不需要新增：
+- visual_review_engine_v4.py
+
+若 GitHub 中曾經新增 visual_review_engine_v4.py：
+- 可以刪除，因為本版 app.py 不會引用它。
+
+更新完成後：
+1. Commit changes。
+2. 到 Streamlit Cloud 執行 Reboot app。
+3. 確認 app.py 是：
+   from visual_review_loop import run_visual_review_loop
+4. 確認呼叫方式是位置參數：
+   run_visual_review_loop(building_image, model, max_rounds)
