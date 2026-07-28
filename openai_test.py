@@ -17,7 +17,7 @@ points 按順時針或逆時針排列，至少 4 點。
 """
 
 USER_PROMPT = """
-分析這張已裁切、只保留建築主體的樓層平面圖。
+分析這張已自動裁切、只保留建築主體的樓層平面圖。
 輸出所有可以計算室內面積的獨立空間多邊形。
 優先辨識臥室、客餐廳、衛浴、更衣室與其他封閉房間。
 """
@@ -28,10 +28,10 @@ def image_to_data_url(image: Image.Image) -> str:
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
 
-def analyze_with_openai(image: Image.Image, model: str = "gpt-5.6") -> FloorplanResult:
+def analyze_with_openai(image: Image.Image, model: str) -> FloorplanResult:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("找不到 OPENAI_API_KEY。請先設定環境變數或 Streamlit secret。")
+        raise RuntimeError("找不到 OPENAI_API_KEY。請在 Streamlit Secrets 設定。")
 
     client = OpenAI(api_key=api_key)
     response = client.responses.parse(
@@ -52,6 +52,8 @@ def analyze_with_openai(image: Image.Image, model: str = "gpt-5.6") -> Floorplan
         ],
         text_format=FloorplanResult,
     )
+
     if response.output_parsed is None:
         raise RuntimeError("OpenAI 沒有回傳可解析的 Polygon 結果。")
+
     return response.output_parsed

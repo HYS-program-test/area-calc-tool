@@ -27,9 +27,11 @@ def draw_result(image: Image.Image, result):
         pts = norm_to_pixel(room.points, overlay.width, overlay.height)
         if len(pts) < 3:
             continue
+
         draw.polygon(pts, fill=(255, 0, 0, 28))
         draw.line(pts + [pts[0]], fill=(255, 0, 0, 255), width=5)
         draw.text(pts[0], room.name, fill=(0, 0, 0, 255))
+
         areas.append({
             "name": room.name,
             "room_type": room.room_type,
