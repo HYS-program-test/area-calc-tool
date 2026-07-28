@@ -48,25 +48,91 @@ BUILDING_PROMPT = """
 """
 
 
-ROOM_PROMPT = """
-你正在分析一張已裁切、放大的建築平面圖。
+SPACE_INVENTORY_PROMPT = """
+你是一位建築平面圖判讀人員。這張圖片已經裁切到主要建築範圍。
 
-請模仿人工框選室內使用空間的方式：
-1. 只框主要室內空間，框線貼近牆內側完成面。
-2. 不要把家具、床、桌椅、櫃體、文字、尺寸線、門片弧線、窗線或樓梯踏階當成牆。
-3. 沒有完整隔牆的開放式區域，視為同一空間。
-4. 有完整牆體分隔的臥室、衛浴、儲藏室等，分別框選。
-5. 不要框庭院、陽台、露台、車道、屋外空白。
-6. 第一版以「矩形框」表示空間；框不可穿過實牆，也不可明顯跨入相鄰房間。
-7. 請逐一檢查整張建築圖，避免漏掉下方、右下角或狹小封閉空間。
-8. 座標以本張裁切圖片左上角為原點，輸出 0~1000 的整數相對座標。
-9. 只輸出 JSON，不要加說明或 Markdown。
+本階段只做「空間盤點」，不要輸出任何座標，也不要框選物件。
 
-輸出格式：
+請逐區閱讀整張圖，列出所有應被視為獨立室內使用面積的空間。
+你要辨識的是完整空間，不是床、櫃子、樓梯、洗手台、門、門弧、尺寸線或設備。
+
+判斷原則：
+- 有完整牆體分隔的臥室、衛浴、儲藏室等，分別列出。
+- 開放式客廳、餐廳、廚房若沒有完整隔牆，合併成一個空間。
+- 樓梯本體、電梯設備、家具與櫃體不是房間。
+- 陽台、露台、庭院、車道與室外空白不要列入。
+- 走道若只是開放空間的一部分，不要切成多個碎片。
+- 請依左上、上中、右上、左中、中央、右中、左下、中下、右下逐區檢查。
+- 不確定的項目可以標示較低 confidence，但仍需避免把物件當空間。
+
+只輸出 JSON：
+{
+  "spaces": [
+    {
+      "id": "S1",
+      "name": "空間名稱",
+      "location": "例如左下、右上、中央",
+      "description": "以牆體與相鄰空間描述其位置",
+      "confidence": 0.0
+    }
+  ]
+}
+"""
+
+
+SINGLE_SPACE_BBOX_PROMPT_TEMPLATE = """
+你是一位建築平面圖判讀人員。
+
+目前只處理一個指定空間，不要框其他空間，也不要框任何家具或設備。
+
+指定空間：
+- id: {space_id}
+- name: {space_name}
+- location: {location}
+- description: {description}
+
+請在圖片中找到這個完整室內空間，輸出一個最能代表其主要可使用面積的矩形 bbox。
+
+規則：
+- 框的是整個空間，不是空間裡的床、櫃子、樓梯、設備、門或尺寸標註。
+- bbox 邊界應儘量貼近牆內側完成面。
+- 不得跨越實牆進入相鄰房間。
+- 若空間為 L 型，先以能涵蓋主要使用區域、且不明顯跨牆的最大合理矩形表示。
+- 若找不到此空間，found 請回傳 false。
+- 座標以本張圖片左上角為原點，輸出 0~1000 的整數相對座標。
+
+只輸出 JSON：
+{
+  "id": "{space_id}",
+  "found": true,
+  "bbox": {"x1": 0, "y1": 0, "x2": 0, "y2": 0},
+  "confidence": 0.0,
+  "check": "此框代表完整室內空間的簡短理由"
+}
+"""
+
+
+REVIEW_PROMPT = """
+你是一位負責檢查平面圖框選結果的建築師。
+
+請檢查下面候選框是否確實代表完整室內空間，而不是家具、設備、樓梯、門、尺寸線或其他圖面物件。
+
+候選框資料：
+{candidate_json}
+
+檢查規則：
+- 完整房間或完整開放式使用空間才保留。
+- 框到床、櫃子、樓梯、電梯設備、洗手台、門片、門弧、尺寸線者刪除。
+- 明顯跨越實牆或跨入相鄰空間者刪除。
+- 高度重複者只保留較合理的一個。
+- 不要自行新增未在候選清單中的框。
+- 座標維持 0~1000 相對座標。
+
+只輸出 JSON：
 {
   "rooms": [
     {
-      "id": "A",
+      "id": "S1",
       "name": "空間名稱",
       "bbox": {"x1": 0, "y1": 0, "x2": 0, "y2": 0},
       "confidence": 0.0
@@ -307,42 +373,215 @@ def crop_and_prepare_canvas(
     return cropped_image, canvas_image, coordinate_info
 
 
+
+def _bbox_iou(a: dict[str, int], b: dict[str, int]) -> float:
+    ix1 = max(a["x1"], b["x1"])
+    iy1 = max(a["y1"], b["y1"])
+    ix2 = min(a["x2"], b["x2"])
+    iy2 = min(a["y2"], b["y2"])
+
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+    intersection = iw * ih
+
+    area_a = max(0, a["x2"] - a["x1"]) * max(0, a["y2"] - a["y1"])
+    area_b = max(0, b["x2"] - b["x1"]) * max(0, b["y2"] - b["y1"])
+    union = area_a + area_b - intersection
+
+    return intersection / union if union > 0 else 0.0
+
+
+def _remove_duplicate_rooms(
+    rooms: list[dict[str, Any]],
+    iou_threshold: float = 0.72,
+) -> list[dict[str, Any]]:
+    """
+    刪除高度重疊的重複框，保留信心較高者。
+    """
+    selected: list[dict[str, Any]] = []
+
+    for room in sorted(
+        rooms,
+        key=lambda item: item.get("confidence", 0.0),
+        reverse=True,
+    ):
+        bbox = room["bbox_canvas_normalized"]
+        if any(
+            _bbox_iou(bbox, kept["bbox_canvas_normalized"]) >= iou_threshold
+            for kept in selected
+        ):
+            continue
+        selected.append(room)
+
+    return selected
+
+def _safe_float(value: Any, default: float = 0.5) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _detect_space_inventory(
+    canvas_image: Image.Image,
+    options: DetectionOptions,
+) -> list[dict[str, Any]]:
+    raw = _call_vision_json(
+        canvas_image,
+        SPACE_INVENTORY_PROMPT,
+        options,
+    )
+
+    spaces: list[dict[str, Any]] = []
+    for index, item in enumerate(raw.get("spaces", [])):
+        spaces.append(
+            {
+                "id": str(item.get("id") or f"S{index + 1}"),
+                "name": str(item.get("name") or f"空間 {index + 1}"),
+                "location": str(item.get("location") or ""),
+                "description": str(item.get("description") or ""),
+                "confidence": _safe_float(item.get("confidence"), 0.5),
+            }
+        )
+
+    # 避免模型一次盤點過多可疑碎片。
+    return spaces[:20]
+
+
+def _detect_one_space_bbox(
+    canvas_image: Image.Image,
+    space: dict[str, Any],
+    options: DetectionOptions,
+) -> dict[str, Any] | None:
+    prompt = SINGLE_SPACE_BBOX_PROMPT_TEMPLATE.format(
+        space_id=space["id"],
+        space_name=space["name"],
+        location=space["location"],
+        description=space["description"],
+    )
+
+    raw = _call_vision_json(canvas_image, prompt, options)
+
+    if not bool(raw.get("found", True)):
+        return None
+
+    bbox = _normalize_bbox(raw.get("bbox", {}))
+    width = bbox["x2"] - bbox["x1"]
+    height = bbox["y2"] - bbox["y1"]
+
+    # 過小或過度狹長者，通常不是完整室內空間。
+    if width < 70 or height < 70:
+        return None
+
+    aspect_ratio = max(
+        width / max(height, 1),
+        height / max(width, 1),
+    )
+    if aspect_ratio > 5.0:
+        return None
+
+    return {
+        "id": space["id"],
+        "name": space["name"],
+        "bbox_canvas_normalized": bbox,
+        "confidence": min(
+            space["confidence"],
+            _safe_float(raw.get("confidence"), 0.5),
+        ),
+        "check": str(raw.get("check") or ""),
+    }
+
+
+def _review_candidate_rooms(
+    canvas_image: Image.Image,
+    candidates: list[dict[str, Any]],
+    options: DetectionOptions,
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+
+    payload = [
+        {
+            "id": item["id"],
+            "name": item["name"],
+            "bbox": item["bbox_canvas_normalized"],
+            "confidence": item["confidence"],
+            "check": item.get("check", ""),
+        }
+        for item in candidates
+    ]
+
+    prompt = REVIEW_PROMPT.format(
+        candidate_json=json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+    raw = _call_vision_json(canvas_image, prompt, options)
+
+    reviewed: list[dict[str, Any]] = []
+    for item in raw.get("rooms", []):
+        bbox = _normalize_bbox(item.get("bbox", {}))
+        width = bbox["x2"] - bbox["x1"]
+        height = bbox["y2"] - bbox["y1"]
+
+        if width < 70 or height < 70:
+            continue
+
+        aspect_ratio = max(
+            width / max(height, 1),
+            height / max(width, 1),
+        )
+        if aspect_ratio > 5.0:
+            continue
+
+        reviewed.append(
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(item.get("name") or "室內空間"),
+                "bbox_canvas_normalized": bbox,
+                "confidence": _safe_float(item.get("confidence"), 0.5),
+            }
+        )
+
+    return _remove_duplicate_rooms(reviewed)
+
+
 def detect_rooms_on_cropped_canvas(
     canvas_image: Image.Image,
     options: DetectionOptions | None = None,
 ) -> dict[str, Any]:
     """
-    第二次 OpenAI 呼叫：
-    對裁切後、放大的固定畫布框選室內空間。
+    多步驟 AI 辨識：
+    1. 盤點有哪些室內空間，不輸出座標。
+    2. 每個空間分別呼叫一次 API 取得 bbox。
+    3. 再呼叫一次 API 審查候選框。
     """
     options = options or DetectionOptions()
-    raw = _call_vision_json(canvas_image, ROOM_PROMPT, options)
 
-    rooms: list[dict[str, Any]] = []
-    for index, room in enumerate(raw.get("rooms", [])):
-        bbox = _normalize_bbox(room.get("bbox", {}))
-        width = bbox["x2"] - bbox["x1"]
-        height = bbox["y2"] - bbox["y1"]
+    inventory = _detect_space_inventory(canvas_image, options)
+    candidates: list[dict[str, Any]] = []
 
-        # 排除過小的文字或符號框。
-        if width < 25 or height < 25:
-            continue
-
-        try:
-            confidence = float(room.get("confidence", 0.5))
-        except (TypeError, ValueError):
-            confidence = 0.5
-
-        rooms.append(
-            {
-                "id": str(room.get("id") or chr(65 + index)),
-                "name": str(room.get("name") or f"空間 {index + 1}"),
-                "bbox_canvas_normalized": bbox,
-                "confidence": max(0.0, min(1.0, confidence)),
-            }
+    for space in inventory:
+        room = _detect_one_space_bbox(
+            canvas_image,
+            space,
+            options,
         )
+        if room is not None:
+            candidates.append(room)
 
-    # 由上到下、由左到右重新排序。
+    reviewed = _review_candidate_rooms(
+        canvas_image,
+        candidates,
+        options,
+    )
+
+    # Reviewer 若意外回傳空集合，保留初步結果，避免整頁無框。
+    rooms = reviewed or _remove_duplicate_rooms(candidates)
+
     rooms.sort(
         key=lambda item: (
             item["bbox_canvas_normalized"]["y1"],
@@ -354,10 +593,13 @@ def detect_rooms_on_cropped_canvas(
         room["id"] = chr(65 + index) if index < 26 else f"R{index + 1}"
 
     if not rooms:
-        raise ValueError("裁切後未辨識到有效室內空間。")
+        raise ValueError("AI 多步驟判讀後仍未找到有效室內空間。")
 
-    return {"rooms": rooms}
-
+    return {
+        "inventory": inventory,
+        "candidates_before_review": candidates,
+        "rooms": rooms,
+    }
 
 def canvas_normalized_bbox_to_canvas_pixels(
     bbox: dict[str, int],

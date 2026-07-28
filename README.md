@@ -1,71 +1,57 @@
-# 平面圖框選 v1.1：加入裁切與座標回推
+# v1.3：多步驟 AI 空間辨識
 
-這版不是大幅重寫，而是在上一版補回兩個必要步驟：
+這版保留原有 Streamlit、裁切、固定畫布及座標回推架構，只修改「房間辨識 API 呼叫方式」。
 
-1. **先找建築主體並裁切**
-2. **保留 Canvas 與原圖兩套座標**
-
-## 實際流程
+## 新流程
 
 ```text
-PDF / 圖片
-↓
-300 DPI 轉圖
-↓
-OpenAI 第一次呼叫：找建築主體 bbox
-↓
-回推成原圖 crop_box
-↓
-裁切建築主體
-↓
-等比例放大到 1166 × 1200 固定畫布
-↓
-OpenAI 第二次呼叫：框主要室內空間
-↓
-相對 bbox 轉 Canvas Polygon
-↓
-Canvas Polygon 回推原圖座標
-↓
-送入既有 floorplan_editor
+PDF
+→ 300 DPI
+→ AI 找建築主體
+→ 裁切與放大
+→ AI 第 1 次：盤點有哪些完整室內空間，不輸出座標
+→ AI 第 2~N 次：每個空間分別取得 bbox
+→ AI 最後 1 次：審查候選框，刪除家具、設備、樓梯及錯誤框
+→ bbox 轉 Polygon
+→ 回推原圖座標
+→ floorplan_editor
 ```
 
 ## 替換方式
 
-將以下兩個檔案放入原專案：
+只需用本版的：
 
 - `room_bbox_detector.py`
-- `app_bbox_example.py`
 
-保留你目前的：
+覆蓋現有同名檔案。
 
-- `floorplan_editor.py`
+`app_bbox_example.py` 與 `floorplan_editor.py` 可先保持不變。
 
-執行：
+## API 呼叫次數
 
-```bash
-streamlit run app_bbox_example.py
-```
+假設盤點出 6 個空間，第二階段約會使用：
 
-## 輸出座標
+- 1 次：空間盤點
+- 6 次：逐空間框選
+- 1 次：結果審查
 
-每一個 room 會同時包含：
+合計約 8 次，再加上前面的建築主體裁切辨識 1 次。
+
+## 除錯資料
+
+`room_detection` 現在包含：
 
 ```python
 {
-    "points": [...],           # 1166 × 1200 Canvas 座標
-    "original_points": [...]   # 原始 PDF Render 圖片座標
+    "inventory": [...],
+    "candidates_before_review": [...],
+    "rooms": [...]
 }
 ```
 
-`points` 用在頁面編輯器。
+可分別檢查：
 
-`original_points` 用在最後輸出 PDF 疊圖。
-
-## 注意
-
-這版使用兩次 OpenAI 影像呼叫：
-
-- 第一次只找建築主體，用於裁切。
-- 第二次只分析裁切後的建築圖，用於房間框選。
-
-這比把整張基地圖直接縮小後一次辨識，更接近先前人工框選流程。
+- AI 認為圖面有哪些空間
+- 每個空間初次取得的 bbox
+- Reviewer 最後保留的框
+```
