@@ -107,60 +107,51 @@ if uploaded:
     )
     df = pd.DataFrame(rows)
 
+    expected_columns = [
+        "編號",
+        "區域名稱",
+        "面積 (m²)",
+        "面積 (坪)",
+        "空間類型",
+        "每坪建議負荷值 (kcal/h/坪)",
+        "總熱負荷 (kcal/h)",
+        "室內機型號",
+        "室內機冷房能力 (kW)",
+        "室外機型號",
+        "連結率 (%)",
+    ]
+
+    # 防止任何欄位缺失造成 KeyError。
+    for column in expected_columns:
+        if column not in df.columns:
+            if column in ("面積 (m²)", "面積 (坪)", "總熱負荷 (kcal/h)"):
+                df[column] = 0.0
+            elif column == "每坪建議負荷值 (kcal/h/坪)":
+                df[column] = 650.0
+            else:
+                df[column] = ""
+
+    # 再次強制依公式計算，確保畫面一定有「面積 (坪)」與正確總熱負荷。
+    df["面積 (坪)"] = (
+        pd.to_numeric(df["面積 (m²)"], errors="coerce").fillna(0.0)
+        / 3.305785
+    ).round(2)
+
+    df["總熱負荷 (kcal/h)"] = (
+        pd.to_numeric(df["面積 (坪)"], errors="coerce").fillna(0.0)
+        * pd.to_numeric(
+            df["每坪建議負荷值 (kcal/h/坪)"],
+            errors="coerce",
+        ).fillna(650.0)
+    ).round(2)
+
+    df = df[expected_columns]
+
     st.subheader("空調負荷計算結果")
     st.caption(
         "可直接修改區域名稱、空間類型、每坪建議負荷值、"
-        "室內外機資料與連結率；面積及總熱負荷由系統自動計算。"
+        "室內外機資料與連結率；面積與總熱負荷由系統自動計算。"
     )
-
-    column_config = {
-        "編號": st.column_config.NumberColumn(
-            "編號", disabled=True, format="%d"
-        ),
-        "區域名稱": st.column_config.TextColumn(
-            "區域名稱", required=True
-        ),
-        "面積 (m²)": st.column_config.NumberColumn(
-            "面積 (m²)", disabled=True, format="%.2f"
-        ),
-        "面積 (坪)": st.column_config.NumberColumn(
-            "面積 (坪)", disabled=True, format="%.2f"
-        ),
-        "空間類型": st.column_config.SelectboxColumn(
-            "空間類型",
-            options=[
-                "一般辦公室", "辦公室", "主管室", "會議室",
-                "教室", "商店", "機房", "走道", "其他",
-            ],
-            required=True,
-        ),
-        "每坪建議負荷值 (kcal/h/坪)": st.column_config.NumberColumn(
-            "每坪建議負荷值 (kcal/h/坪)",
-            min_value=0.0,
-            step=50.0,
-            format="%.0f",
-            required=True,
-        ),
-        "總熱負荷 (kcal/h)": st.column_config.NumberColumn(
-            "總熱負荷 (kcal/h)",
-            disabled=True,
-            format="%.2f",
-        ),
-        "室內機型號": st.column_config.TextColumn("室內機型號"),
-        "室內機冷房能力 (kW)": st.column_config.NumberColumn(
-            "室內機冷房能力 (kW)",
-            min_value=0.0,
-            step=0.1,
-            format="%.2f",
-        ),
-        "室外機型號": st.column_config.TextColumn("室外機型號"),
-        "連結率 (%)": st.column_config.NumberColumn(
-            "連結率 (%)",
-            min_value=0.0,
-            step=1.0,
-            format="%.1f",
-        ),
-    }
 
     edited_df = st.data_editor(
         df,
@@ -173,7 +164,54 @@ if uploaded:
             "面積 (坪)",
             "總熱負荷 (kcal/h)",
         ],
-        column_config=column_config,
+        column_config={
+            "編號": st.column_config.NumberColumn(
+                "編號", disabled=True, format="%d"
+            ),
+            "區域名稱": st.column_config.TextColumn(
+                "區域名稱", required=True
+            ),
+            "面積 (m²)": st.column_config.NumberColumn(
+                "面積 (m²)", disabled=True, format="%.2f"
+            ),
+            "面積 (坪)": st.column_config.NumberColumn(
+                "面積 (坪)", disabled=True, format="%.2f"
+            ),
+            "空間類型": st.column_config.SelectboxColumn(
+                "空間類型",
+                options=[
+                    "一般辦公室", "辦公室", "主管室", "會議室",
+                    "教室", "商店", "機房", "走道", "其他",
+                ],
+                required=True,
+            ),
+            "每坪建議負荷值 (kcal/h/坪)": st.column_config.NumberColumn(
+                "每坪建議負荷值 (kcal/h/坪)",
+                min_value=0.0,
+                step=50.0,
+                format="%.0f",
+                required=True,
+            ),
+            "總熱負荷 (kcal/h)": st.column_config.NumberColumn(
+                "總熱負荷 (kcal/h)",
+                disabled=True,
+                format="%.2f",
+            ),
+            "室內機型號": st.column_config.TextColumn("室內機型號"),
+            "室內機冷房能力 (kW)": st.column_config.NumberColumn(
+                "室內機冷房能力 (kW)",
+                min_value=0.0,
+                step=0.1,
+                format="%.2f",
+            ),
+            "室外機型號": st.column_config.TextColumn("室外機型號"),
+            "連結率 (%)": st.column_config.NumberColumn(
+                "連結率 (%)",
+                min_value=0.0,
+                step=1.0,
+                format="%.1f",
+            ),
+        },
         key="hvac_result_editor",
     )
 

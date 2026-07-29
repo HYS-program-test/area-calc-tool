@@ -32,7 +32,7 @@ def calculate_rows(
     image_height: int,
     pixels_per_m2: float,
 ) -> List[Dict[str, Any]]:
-    """建立空調負荷計算表。
+    """建立空調負荷計算結果。
 
     面積(坪) = 面積(m²) / 3.305785
     總熱負荷(kcal/h) = 面積(坪) × 每坪建議負荷值(kcal/h/坪)
@@ -51,7 +51,7 @@ def calculate_rows(
         area_m2 = polygon_area_pixels(px_points) / pixels_per_m2
         area_ping = area_m2 / M2_PER_PING
         per_ping_load = _to_float(room.get("per_ping_load"), 650.0)
-        total_heat_kcal_h = area_ping * per_ping_load
+        total_heat = area_ping * per_ping_load
 
         rows.append(
             {
@@ -61,7 +61,7 @@ def calculate_rows(
                 "面積 (坪)": round(area_ping, 2),
                 "空間類型": room.get("room_type", "一般辦公室"),
                 "每坪建議負荷值 (kcal/h/坪)": round(per_ping_load, 2),
-                "總熱負荷 (kcal/h)": round(total_heat_kcal_h, 2),
+                "總熱負荷 (kcal/h)": round(total_heat, 2),
                 "室內機型號": room.get("indoor_model") or "",
                 "室內機冷房能力 (kW)": (
                     _to_float(room.get("indoor_capacity_kw"))
