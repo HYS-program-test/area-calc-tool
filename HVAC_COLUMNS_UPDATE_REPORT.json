@@ -1,0 +1,23 @@
+{
+  "expected_columns_match": true,
+  "connection_rate_test": true,
+  "sample_row": {
+    "編號": 1,
+    "區域名稱": "測試區域",
+    "面積 (m²)": 100.0,
+    "空間類型": "一般辦公室",
+    "每坪建議負荷值 (kcal/h/坪)": 650,
+    "總熱負荷 (W)": 22867,
+    "室內機型號": "CS-M28FA2",
+    "室內機冷房能力 (kW)": 2.8,
+    "室外機型號": "CU-M80FCA2",
+    "連結率 (%)": 35.0
+  },
+  "compile__smoke_test.py": "PASS",
+  "compile_app.py": "PASS",
+  "compile_openai_gateway.py": "PASS",
+  "compile_floorplan_editor.py": "PASS",
+  "compile_hvac.py": "PASS",
+  "compile_pdf_utils.py": "PASS",
+  "compile_schemas.py": "PASS"
+}

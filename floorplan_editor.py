@@ -20,12 +20,14 @@ def floorplan_editor(
     image_data_url: str,
     rooms: list[dict],
     zoom: float = 0.60,
+    revision: int = 0,
     key: str | None = None,
 ):
     return _COMPONENT(
         image_data_url=image_data_url,
         rooms=rooms,
         zoom=zoom,
+        revision=revision,
         key=key,
         default={"rooms": rooms, "zoom": zoom},
     )
