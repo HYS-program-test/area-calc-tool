@@ -99,24 +99,147 @@ if uploaded:
     else:
         edited_rooms = st.session_state.get("rooms", rooms)
 
-    rows = calculate_rows(edited_rooms, image.width, image.height, pixels_per_m2)
+    rows = calculate_rows(
+        edited_rooms,
+        image.width,
+        image.height,
+        pixels_per_m2,
+    )
     df = pd.DataFrame(rows)
 
     st.subheader("空調負荷計算結果")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption(
+        "可直接修改區域名稱、空間類型、每坪建議負荷值、"
+        "室內外機資料與連結率；面積及總熱負荷由系統自動計算。"
+    )
 
-    total_area = df["面積 (m²)"].sum() if not df.empty else 0
-    total_load = df["總熱負荷 (W)"].sum() if not df.empty else 0
+    column_config = {
+        "編號": st.column_config.NumberColumn(
+            "編號", disabled=True, format="%d"
+        ),
+        "區域名稱": st.column_config.TextColumn(
+            "區域名稱", required=True
+        ),
+        "面積 (m²)": st.column_config.NumberColumn(
+            "面積 (m²)", disabled=True, format="%.2f"
+        ),
+        "面積 (坪)": st.column_config.NumberColumn(
+            "面積 (坪)", disabled=True, format="%.2f"
+        ),
+        "空間類型": st.column_config.SelectboxColumn(
+            "空間類型",
+            options=[
+                "一般辦公室", "辦公室", "主管室", "會議室",
+                "教室", "商店", "機房", "走道", "其他",
+            ],
+            required=True,
+        ),
+        "每坪建議負荷值 (kcal/h/坪)": st.column_config.NumberColumn(
+            "每坪建議負荷值 (kcal/h/坪)",
+            min_value=0.0,
+            step=50.0,
+            format="%.0f",
+            required=True,
+        ),
+        "總熱負荷 (kcal/h)": st.column_config.NumberColumn(
+            "總熱負荷 (kcal/h)",
+            disabled=True,
+            format="%.2f",
+        ),
+        "室內機型號": st.column_config.TextColumn("室內機型號"),
+        "室內機冷房能力 (kW)": st.column_config.NumberColumn(
+            "室內機冷房能力 (kW)",
+            min_value=0.0,
+            step=0.1,
+            format="%.2f",
+        ),
+        "室外機型號": st.column_config.TextColumn("室外機型號"),
+        "連結率 (%)": st.column_config.NumberColumn(
+            "連結率 (%)",
+            min_value=0.0,
+            step=1.0,
+            format="%.1f",
+        ),
+    }
 
-    indoor_capacity = pd.to_numeric(
-        df["室內機冷房能力 (kW)"],
-        errors="coerce",
-    ).sum() if not df.empty else 0
+    edited_df = st.data_editor(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        disabled=[
+            "編號",
+            "面積 (m²)",
+            "面積 (坪)",
+            "總熱負荷 (kcal/h)",
+        ],
+        column_config=column_config,
+        key="hvac_result_editor",
+    )
+
+    def clean_optional_number(value):
+        if pd.isna(value) or value in ("", "-"):
+            return None
+        return float(value)
+
+    room_by_id = {
+        str(room.get("id")): room
+        for room in st.session_state.get("rooms", edited_rooms)
+    }
+    changed = False
+
+    for _, row in edited_df.iterrows():
+        room = room_by_id.get(str(row["編號"]))
+        if room is None:
+            continue
+
+        updates = {
+            "name": str(row["區域名稱"]).strip(),
+            "room_type": str(row["空間類型"]),
+            "per_ping_load": float(
+                row["每坪建議負荷值 (kcal/h/坪)"]
+            ),
+            "indoor_model": (
+                str(row["室內機型號"]).strip()
+                if not pd.isna(row["室內機型號"])
+                else ""
+            ),
+            "indoor_capacity_kw": clean_optional_number(
+                row["室內機冷房能力 (kW)"]
+            ),
+            "outdoor_model": (
+                str(row["室外機型號"]).strip()
+                if not pd.isna(row["室外機型號"])
+                else ""
+            ),
+            "connection_rate": clean_optional_number(
+                row["連結率 (%)"]
+            ),
+        }
+
+        for field, value in updates.items():
+            if room.get(field) != value:
+                room[field] = value
+                changed = True
+
+    if changed:
+        st.session_state["rooms"] = list(room_by_id.values())
+        if "hvac_result_editor" in st.session_state:
+            del st.session_state["hvac_result_editor"]
+        st.rerun()
+
+    total_area_m2 = df["面積 (m²)"].sum() if not df.empty else 0
+    total_area_ping = df["面積 (坪)"].sum() if not df.empty else 0
+    total_load = (
+        df["總熱負荷 (kcal/h)"].sum()
+        if not df.empty
+        else 0
+    )
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("總面積", f"{total_area:.2f} m²")
-    m2.metric("總熱負荷", f"{total_load:,.0f} W")
-    m3.metric("室內機冷房能力合計", f"{indoor_capacity:.2f} kW")
+    m1.metric("總面積", f"{total_area_m2:.2f} m²")
+    m2.metric("總坪數", f"{total_area_ping:.2f} 坪")
+    m3.metric("總熱負荷", f"{total_load:,.2f} kcal/h")
 
     st.download_button(
         "匯出結果 CSV",

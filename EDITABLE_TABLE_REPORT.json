@@ -1,0 +1,24 @@
+{
+  "compile_app.py": "PASS",
+  "compile_openai_gateway.py": "PASS",
+  "compile_floorplan_editor.py": "PASS",
+  "compile_hvac.py": "PASS",
+  "compile_pdf_utils.py": "PASS",
+  "compile_schemas.py": "PASS",
+  "area_ping_present": true,
+  "formula_check": true,
+  "editable_table_present": true,
+  "sample": {
+    "編號": 1,
+    "區域名稱": "A",
+    "面積 (m²)": 100.0,
+    "面積 (坪)": 30.25,
+    "空間類型": "會議室",
+    "每坪建議負荷值 (kcal/h/坪)": 800.0,
+    "總熱負荷 (kcal/h)": 24200.0,
+    "室內機型號": "",
+    "室內機冷房能力 (kW)": null,
+    "室外機型號": "",
+    "連結率 (%)": null
+  }
+}
