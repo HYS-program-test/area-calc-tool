@@ -84,6 +84,7 @@ if uploaded:
             )
 
     rooms = st.session_state.get("rooms", demo_rooms())
+    # floorplan_editor.py must include the `revision` parameter.
     editor_value = floorplan_editor(
         image_data_url=to_data_url(image),
         rooms=rooms,
