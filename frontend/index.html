@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"/>
+<script src="https://cdn.jsdelivr.net/npm/streamlit-component-lib@1.4.0/dist/index.min.js"></script>
+<style>
+body{font-family:Arial,"Microsoft JhengHei",sans-serif;margin:0;background:white;color:#1f2937}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px}
+button{padding:7px 10px;border:1px solid #d1d5db;border-radius:7px;background:white;cursor:pointer}
+button.active{border-color:#2563eb;background:#eff6ff;color:#2563eb}
+.color{width:28px;height:28px;padding:0}
+.stage{overflow:auto;border:1px solid #e5e7eb;border-radius:8px;height:610px;background:#fafafa}
+.canvas-holder{position:relative;transform-origin:top left}
+canvas{position:absolute;left:0;top:0}
+.small{font-size:13px;color:#6b7280}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button id="selectBtn" class="active">選取/移動</button>
+  <button id="addBtn">新增</button>
+  <button id="deleteBtn">刪除</button>
+  <button id="stretchBtn">拉伸</button>
+  <span>改色</span>
+  <button class="color" data-color="#ef4444" style="background:#ef4444"></button>
+  <button class="color" data-color="#f97316" style="background:#f97316"></button>
+  <button class="color" data-color="#f59e0b" style="background:#f59e0b"></button>
+  <button class="color" data-color="#22c55e" style="background:#22c55e"></button>
+  <button class="color" data-color="#3b82f6" style="background:#3b82f6"></button>
+  <button class="color" data-color="#a855f7" style="background:#a855f7"></button>
+  <span class="small">縮放</span>
+  <button id="minusBtn">－</button><strong id="zoomLabel">60%</strong><button id="plusBtn">＋</button>
+  <button id="resetBtn">重置60%</button>
+</div>
+<div class="stage" id="stage">
+  <div class="canvas-holder" id="holder">
+    <canvas id="bg"></canvas>
+    <canvas id="fg"></canvas>
+  </div>
+</div>
+<script>
+let rooms=[], zoom=.60, mode='select', selected=0, drag=null, addStart=null, imageUrl='';
+const holder=document.getElementById('holder');
+const bg=document.getElementById('bg'), fg=document.getElementById('fg');
+const bctx=bg.getContext('2d'), fctx=fg.getContext('2d');
+const image=new Image();
+
+function send(){ Streamlit.setComponentValue({rooms, zoom}); }
+function setFrame(){ Streamlit.setFrameHeight(690); }
+function normToPx(p){ return {x:p.x/1000*fg.width,y:p.y/1000*fg.height}; }
+function pxToNorm(p){ return {x:p.x/fg.width*1000,y:p.y/fg.height*1000}; }
+function roomArea(r){
+  const pts=r.points.map(normToPx); let total=0;
+  for(let i=0;i<pts.length;i++){const a=pts[i],b=pts[(i+1)%pts.length]; total+=a.x*b.y-b.x*a.y}
+  return Math.abs(total)/2;
+}
+function centroid(r){
+  const pts=r.points.map(normToPx); return {x:pts.reduce((s,p)=>s+p.x,0)/pts.length,y:pts.reduce((s,p)=>s+p.y,0)/pts.length};
+}
+function applyZoom(){ holder.style.transform=`scale(${zoom})`; document.getElementById('zoomLabel').textContent=Math.round(zoom*100)+'%'; send(); }
+function draw(){
+  fctx.clearRect(0,0,fg.width,fg.height);
+  rooms.forEach((r,i)=>{
+    const pts=r.points.map(normToPx); if(pts.length<3)return;
+    fctx.beginPath(); fctx.moveTo(pts[0].x,pts[0].y); pts.slice(1).forEach(p=>fctx.lineTo(p.x,p.y)); fctx.closePath();
+    fctx.globalAlpha=.18; fctx.fillStyle=r.color||'#ef4444'; fctx.fill(); fctx.globalAlpha=1;
+    fctx.lineWidth=i===selected?7:4; fctx.strokeStyle=r.color||'#ef4444'; fctx.stroke();
+    const c=centroid(r); fctx.fillStyle='#111'; fctx.font='bold 22px Arial'; fctx.fillText(r.name||`區域${r.id}`,c.x-35,c.y);
+    if(i===selected){ pts.forEach(p=>{fctx.fillStyle='white';fctx.fillRect(p.x-6,p.y-6,12,12);fctx.strokeStyle='#2563eb';fctx.strokeRect(p.x-6,p.y-6,12,12)})}
+  });
+}
+function pointInPoly(pt, r){
+  const vs=r.points.map(normToPx); let inside=false;
+  for(let i=0,j=vs.length-1;i<vs.length;j=i++){
+    const xi=vs[i].x,yi=vs[i].y,xj=vs[j].x,yj=vs[j].y;
+    const intersect=((yi>pt.y)!=(yj>pt.y))&&(pt.x<(xj-xi)*(pt.y-yi)/(yj-yi)+xi);
+    if(intersect)inside=!inside;
+  }
+  return inside;
+}
+function pos(e){const rect=fg.getBoundingClientRect();return{x:(e.clientX-rect.left)/zoom,y:(e.clientY-rect.top)/zoom}}
+fg.onmousedown=e=>{
+  const p=pos(e);
+  if(mode==='add'){addStart=p;return}
+  for(let i=rooms.length-1;i>=0;i--) if(pointInPoly(p,rooms[i])){
+    selected=i; const c=centroid(rooms[i]); drag={dx:p.x-c.x,dy:p.y-c.y,last:p}; draw(); return;
+  }
+};
+fg.onmousemove=e=>{
+  if(!drag||mode!=='select')return;
+  const p=pos(e),dx=p.x-drag.last.x,dy=p.y-drag.last.y;
+  rooms[selected].points=rooms[selected].points.map(q=>{const px=normToPx(q);return pxToNorm({x:px.x+dx,y:px.y+dy})});
+  drag.last=p; draw(); send();
+};
+fg.onmouseup=e=>{
+  const p=pos(e);
+  if(mode==='add'&&addStart){
+    const x1=Math.min(addStart.x,p.x),y1=Math.min(addStart.y,p.y),x2=Math.max(addStart.x,p.x),y2=Math.max(addStart.y,p.y);
+    if(x2-x1>20&&y2-y1>20){
+      const id=rooms.length?Math.max(...rooms.map(r=>r.id))+1:1;
+      rooms.push({id,name:`區域${id}`,room_type:'一般辦公室',confidence:1,color:'#3b82f6',unit_load:120,included:true,
+        points:[pxToNorm({x:x1,y:y1}),pxToNorm({x:x2,y:y1}),pxToNorm({x:x2,y:y2}),pxToNorm({x:x1,y:y2})]});
+      selected=rooms.length-1;
+    }
+    addStart=null;mode='select';selectBtn.classList.add('active');addBtn.classList.remove('active');draw();send();
+  }
+  drag=null;
+};
+selectBtn.onclick=()=>{mode='select';selectBtn.classList.add('active');addBtn.classList.remove('active')};
+addBtn.onclick=()=>{mode='add';addBtn.classList.add('active');selectBtn.classList.remove('active')};
+deleteBtn.onclick=()=>{if(rooms.length){rooms.splice(selected,1);selected=Math.max(0,selected-1);draw();send()}};
+stretchBtn.onclick=()=>{if(!rooms[selected])return;const c=centroid(rooms[selected]);rooms[selected].points=rooms[selected].points.map(q=>{const p=normToPx(q);return pxToNorm({x:c.x+(p.x-c.x)*1.10,y:c.y+(p.y-c.y)*1.10})});draw();send()};
+document.querySelectorAll('.color').forEach(b=>b.onclick=()=>{if(rooms[selected]){rooms[selected].color=b.dataset.color;draw();send()}});
+minusBtn.onclick=()=>{zoom=Math.max(.2,zoom-.1);applyZoom()};
+plusBtn.onclick=()=>{zoom=Math.min(1.5,zoom+.1);applyZoom()};
+resetBtn.onclick=()=>{zoom=.60;applyZoom()};
+
+function onRender(event){
+  const a=event.detail.args; rooms=JSON.parse(JSON.stringify(a.rooms||[])); zoom=a.zoom||.60; imageUrl=a.image_data_url;
+  image.onload=()=>{bg.width=fg.width=image.width;bg.height=fg.height=image.height;holder.style.width=image.width+'px';holder.style.height=image.height+'px';bctx.drawImage(image,0,0);applyZoom();draw();setFrame()};
+  image.src=imageUrl;
+}
+Streamlit.events.addEventListener(Streamlit.RENDER_EVENT,onRender);
+Streamlit.setComponentReady();
+setFrame();
+</script>
+</body>
+</html>
