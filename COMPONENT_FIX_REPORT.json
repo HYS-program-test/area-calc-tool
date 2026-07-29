@@ -1,0 +1,13 @@
+{
+  "_smoke_test.py": "PASS",
+  "app.py": "PASS",
+  "openai_gateway.py": "PASS",
+  "floorplan_editor.py": "PASS",
+  "hvac.py": "PASS",
+  "pdf_utils.py": "PASS",
+  "schemas.py": "PASS",
+  "frontend_exists": true,
+  "frontend_size_bytes": 8787,
+  "cdn_dependency_removed": true,
+  "native_streamlit_postmessage": true
+}
