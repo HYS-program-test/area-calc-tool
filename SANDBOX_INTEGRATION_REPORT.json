@@ -1,0 +1,15 @@
+{
+  "compile": {
+    "app.py": "PASS",
+    "openai_gateway.py": "PASS",
+    "floorplan_editor.py": "PASS",
+    "hvac.py": "PASS",
+    "pdf_utils.py": "PASS",
+    "schemas.py": "PASS"
+  },
+  "smoke_returncode": 0,
+  "smoke_stdout": "{'meta': {'method': 'blue_structural_columns', 'column_count': 8, 'page_count': 1, 'page_index': 0, 'crop_box_points': [226.92, 399.24, 644.88, 742.68], 'output_size_pixels': [1278, 1051]}, 'rows': [{'編號': 1, '區域名稱': '區域1', '面積 (m²)': 5.37, '空間類型': '一般辦公室', '單位負荷 (W/m²)': 120, '顯熱負荷 (W)': 645, '潛熱負荷 (W)': 355, '總冷負荷 (W)': 999, '建議空調能力 (RT)': 0.28, '納入計算': True}, {'編號': 2, '區域名稱': '區域2', '面積 (m²)': 12.09, '空間類型': '會議室', '單位負荷 (W/m²)': 150, '顯熱負荷 (W)': 1813, '潛熱負荷 (W)': 997, '總冷負荷 (W)': 2811, '建議空調能力 (RT)': 0.8, '納入計算': True}]}",
+  "smoke_stderr_tail": "preadsheet_warmup.py\", line 704, in _warm_collaboration_flows\n  File \"/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/generated/interface/models.py\", line 30820, in hydrate_crdt_from_proto\n  File \"/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/rpc/remote.py\", line 749, in __call__\n  File \"/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/rpc/client.py\", line 150, in call\nartifact_tool.rpc.client.RemoteError: hydrateCrdtFromProto requires an empty collaborative document.",
+  "openai_live_call": "NOT_RUN_NO_API_KEY",
+  "component_frontend_exists": true
+}

@@ -1,27 +1,21 @@
-# PDF + 圖片版 OpenAI 房間 Polygon 驗證
+# 空調負荷計算整合版
 
-## 支援輸入
+功能：
+- PDF / 圖片上傳
+- PDF 自動裁切建築本體
+- OpenAI 自動框選房間
+- 預設 60% 圖面縮放
+- 框框移動、拉伸、刪除、改色、新增
+- 空調負荷表格即時更新
+- CSV 匯出
 
-- PDF
-- PNG
-- JPG
-- JPEG
-
-上傳 PDF 後，系統會：
-
-1. 使用 PyMuPDF 讀取 PDF。
-2. 以 PDF 向量物件偵測建築本體。
-3. 自動裁切建築區域。
-4. 將裁切結果渲染成高解析度圖片。
-5. 再送入 OpenAI 取得房間 Polygon。
-
-## Streamlit Secrets
+Streamlit Cloud Secrets：
 
 ```toml
 OPENAI_API_KEY = "你的 API Key"
 ```
 
-## 啟動
+啟動：
 
 ```bash
 pip install -r requirements.txt
