@@ -73,6 +73,8 @@ let mode = "select";
 let selected = 0;
 let drag = null;
 let addStart = null;
+let initialized = false;
+let lastExternalRevision = null;
 
 const holder = document.getElementById("holder");
 const bg = document.getElementById("bg");
@@ -202,7 +204,6 @@ fg.addEventListener("mousemove", event => {
 
   drag.last = p;
   draw();
-  send();
 });
 
 fg.addEventListener("mouseup", event => {
@@ -245,6 +246,9 @@ fg.addEventListener("mouseup", event => {
     send();
   }
 
+  if (drag && mode === "select") {
+    send();
+  }
   drag = null;
 });
 
@@ -320,8 +324,18 @@ window.addEventListener("message", event => {
   }
 
   const args = data.args;
-  rooms = JSON.parse(JSON.stringify(args.rooms || []));
-  zoom = Number(args.zoom || 0.60);
+  const incomingRevision = args.revision ?? 0;
+
+  // Streamlit reruns after setComponentValue(). Do not overwrite the
+  // editor's current local polygons with an older payload during that rerun.
+  if (!initialized || incomingRevision !== lastExternalRevision) {
+    rooms = JSON.parse(JSON.stringify(args.rooms || []));
+    zoom = Number(args.zoom || 0.60);
+    lastExternalRevision = incomingRevision;
+    initialized = true;
+  }
+
+  const requestedImage = args.image_data_url;
 
   image.onload = () => {
     bg.width = fg.width = image.width;
@@ -335,7 +349,11 @@ window.addEventListener("message", event => {
     setFrameHeight(700);
   };
 
-  image.src = args.image_data_url;
+  if (image.src !== requestedImage) {
+    image.src = requestedImage;
+  } else if (image.complete) {
+    image.onload();
+  }
 });
 
 componentReady();

@@ -18,10 +18,13 @@ class RoomPolygon(BaseModel):
 
     unit_load: float = 120.0
     per_ping_load: Optional[float] = 650.0
+
     indoor_model: Optional[str] = None
+    indoor_quantity: int = 1
     indoor_capacity_kw: Optional[float] = None
     outdoor_model: Optional[str] = None
     connection_rate: Optional[float] = None
+
     included: bool = True
 
 

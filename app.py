@@ -2,15 +2,28 @@ import base64
 import hashlib
 import io
 import os
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from PIL import Image
 
 from floorplan_editor import floorplan_editor
+from equipment import (
+    DEFAULT_EQUIPMENT_FILENAME,
+    load_vrv_equipment,
+    recommend_indoor,
+    recommend_outdoor,
+)
 from hvac import calculate_rows
 from openai_gateway import analyze_floorplan
 from pdf_utils import render_pdf_page
+
+
+EQUIPMENT_FILE = (
+    Path(__file__).resolve().parent
+    / DEFAULT_EQUIPMENT_FILENAME
+)
 
 
 st.set_page_config(
@@ -289,6 +302,7 @@ with st.sidebar:
         step=100.0,
     )
 
+
     page_no = 1
     run_ai = False
     load_demo = False
@@ -417,11 +431,12 @@ if uploaded:
         "區域名稱",
         "面積 (m²)",
         "面積 (坪)",
-        "空間類型",
         "每坪建議負荷值 (kcal/h/坪)",
-        "總熱負荷 (kcal/h)",
+        "總熱負荷 (kW)",
         "室內機型號",
+        "室內機數量",
         "室內機冷房能力 (kW)",
+        "平均負荷 (kW/坪)",
         "室外機型號",
         "連結率 (%)",
     ]
@@ -431,11 +446,14 @@ if uploaded:
             if column in (
                 "面積 (m²)",
                 "面積 (坪)",
-                "總熱負荷 (kcal/h)",
+                "總熱負荷 (kW)",
+                "平均負荷 (kW/坪)",
             ):
                 df[column] = 0.0
             elif column == "每坪建議負荷值 (kcal/h/坪)":
                 df[column] = 650.0
+            elif column == "室內機數量":
+                df[column] = 1
             else:
                 df[column] = ""
 
@@ -446,14 +464,116 @@ if uploaded:
         .round(2)
     )
 
-    df["總熱負荷 (kcal/h)"] = (
+    df["總熱負荷 (kW)"] = (
         pd.to_numeric(df["面積 (坪)"], errors="coerce").fillna(0.0)
         * pd.to_numeric(
             df["每坪建議負荷值 (kcal/h/坪)"],
             errors="coerce",
         ).fillna(650.0)
+        / 860.0
     ).round(2)
 
+    indoor_units = []
+    outdoor_units = []
+
+    try:
+        indoor_units, outdoor_units = load_vrv_equipment(
+            EQUIPMENT_FILE
+        )
+        st.sidebar.success(
+            f"設備表已載入：室內機 {len(indoor_units)} 筆、"
+            f"室外機 {len(outdoor_units)} 筆"
+        )
+    except FileNotFoundError:
+        st.sidebar.warning(
+            f"尚未找到 {DEFAULT_EQUIPMENT_FILENAME}；"
+            "請將檔案放在 GitHub 專案根目錄。"
+        )
+    except Exception as exc:
+        st.sidebar.error(f"設備報價單讀取失敗：{exc}")
+
+    room_by_id_for_selection = {
+        str(room.get("id")): room
+        for room in st.session_state.get("rooms", edited_rooms)
+    }
+
+    # Auto-select the smallest indoor unit capacity above room demand.
+    if indoor_units:
+        for row_index, row in df.iterrows():
+            room = room_by_id_for_selection.get(str(row["編號"]))
+            if room is None:
+                continue
+
+            recommendation = recommend_indoor(
+                float(row["總熱負荷 (kW)"]),
+                indoor_units,
+            )
+
+            # Only auto-fill empty model fields, preserving user edits.
+            if not room.get("indoor_model"):
+                room["indoor_model"] = recommendation["model"]
+                room["indoor_capacity_kw"] = recommendation["capacity_kw"]
+                room["indoor_quantity"] = recommendation["quantity"]
+
+            df.at[row_index, "室內機型號"] = (
+                room.get("indoor_model") or ""
+            )
+            df.at[row_index, "室內機數量"] = int(
+                room.get("indoor_quantity", 1) or 1
+            )
+            df.at[row_index, "室內機冷房能力 (kW)"] = (
+                room.get("indoor_capacity_kw")
+            )
+
+    indoor_capacity_series = pd.to_numeric(
+        df["室內機冷房能力 (kW)"],
+        errors="coerce",
+    )
+    indoor_quantity_series = pd.to_numeric(
+        df["室內機數量"],
+        errors="coerce",
+    ).fillna(1)
+
+    df["平均負荷 (kW/坪)"] = (
+        indoor_capacity_series
+        * indoor_quantity_series
+        / pd.to_numeric(df["面積 (坪)"], errors="coerce").replace(0, pd.NA)
+    ).round(2)
+
+    # One VRV outdoor unit is selected for the current group of indoor units.
+    if outdoor_units and not df.empty:
+        indoor_rows_for_outdoor = [
+            {
+                "indoor_model": str(row["室內機型號"]),
+                "indoor_quantity": int(row["室內機數量"] or 1),
+            }
+            for _, row in df.iterrows()
+            if str(row["室內機型號"]).strip()
+        ]
+        outdoor_recommendation = recommend_outdoor(
+            indoor_rows_for_outdoor,
+            outdoor_units,
+            min_rate=105.0,
+            max_rate=110.0,
+        )
+        if outdoor_recommendation.get("model"):
+            df["室外機型號"] = outdoor_recommendation["model"]
+            df["連結率 (%)"] = round(
+                outdoor_recommendation["connection_rate"],
+                1,
+            )
+
+            for room in room_by_id_for_selection.values():
+                if not room.get("outdoor_model"):
+                    room["outdoor_model"] = outdoor_recommendation["model"]
+                    room["connection_rate"] = round(
+                        outdoor_recommendation["connection_rate"],
+                        1,
+                    )
+
+    st.session_state["rooms"] = list(
+        room_by_id_for_selection.values()
+    )
     df = df[expected_columns]
 
     total_area_m2 = (
@@ -468,7 +588,7 @@ if uploaded:
     )
     total_load = (
         pd.to_numeric(
-            df["總熱負荷 (kcal/h)"],
+            df["總熱負荷 (kW)"],
             errors="coerce",
         ).fillna(0).sum()
         if not df.empty
@@ -493,25 +613,28 @@ if uploaded:
                 "#3b82f6",
                 "#8b5cf6",
             ]
-            room_html = ['<div class="room-list">']
-            for idx, row in df.iterrows():
-                color = palette[idx % len(palette)]
-                room_html.append(
-                    f"""
-                    <div class="room-row">
-                      <span class="room-dot" style="background:{color}">
-                        {row['編號']}
-                      </span>
-                      <span>
-                        {row['區域名稱']}
-                        <br>
-                        <small>{row['面積 (m²)']:.2f} m²</small>
-                      </span>
-                    </div>
-                    """
-                )
-            room_html.append("</div>")
-            st.markdown("".join(room_html), unsafe_allow_html=True)
+            with st.container(border=True):
+                for idx, row in df.iterrows():
+                    item_col, text_col = st.columns([0.22, 1.5])
+                    with item_col:
+                        st.markdown(
+                            (
+                                "<div style='width:28px;height:28px;"
+                                "border-radius:7px;color:white;"
+                                "display:flex;align-items:center;"
+                                "justify-content:center;font-weight:700;"
+                                f"background:{palette[idx % len(palette)]}'>"
+                                f"{row['編號']}</div>"
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    with text_col:
+                        st.markdown(
+                            f"**{row['區域名稱']}**  \\n"
+                            f"{row['面積 (m²)']:.2f} m²"
+                        )
+                    if idx < len(df) - 1:
+                        st.divider()
 
         st.markdown(
             f"""
@@ -535,7 +658,7 @@ if uploaded:
             unsafe_allow_html=True,
         )
         st.caption(
-            "可修改區域名稱、空間類型、每坪建議負荷值、"
+            "可修改區域名稱、每坪建議負荷值、"
             "室內外機資料與連結率；面積與總熱負荷由系統自動計算。"
         )
 
@@ -548,7 +671,8 @@ if uploaded:
             "編號",
             "面積 (m²)",
             "面積 (坪)",
-            "總熱負荷 (kcal/h)",
+            "總熱負荷 (kW)",
+            "平均負荷 (kW/坪)",
         ],
         column_config={
             "編號": st.column_config.NumberColumn(
@@ -574,22 +698,6 @@ if uploaded:
                 format="%.2f",
                 width="small",
             ),
-            "空間類型": st.column_config.SelectboxColumn(
-                "空間類型",
-                options=[
-                    "一般辦公室",
-                    "辦公室",
-                    "主管室",
-                    "會議室",
-                    "教室",
-                    "商店",
-                    "機房",
-                    "走道",
-                    "其他",
-                ],
-                required=True,
-                width="medium",
-            ),
             "每坪建議負荷值 (kcal/h/坪)": (
                 st.column_config.NumberColumn(
                     "每坪建議負荷值 (kcal/h/坪)",
@@ -600,11 +708,24 @@ if uploaded:
                     width="medium",
                 )
             ),
-            "總熱負荷 (kcal/h)": st.column_config.NumberColumn(
-                "總熱負荷 (kcal/h)",
+            "總熱負荷 (kW)": st.column_config.NumberColumn(
+                "總熱負荷 (kW)",
                 disabled=True,
                 format="%.2f",
-                width="medium",
+                width="small",
+            ),
+            "室內機數量": st.column_config.NumberColumn(
+                "室內機數量",
+                min_value=1,
+                step=1,
+                format="%d",
+                width="small",
+            ),
+            "平均負荷 (kW/坪)": st.column_config.NumberColumn(
+                "平均負荷 (kW/坪)",
+                disabled=True,
+                format="%.2f",
+                width="small",
             ),
             "室內機型號": st.column_config.TextColumn(
                 "室內機型號",
@@ -650,7 +771,6 @@ if uploaded:
 
         updates = {
             "name": str(row["區域名稱"]).strip(),
-            "room_type": str(row["空間類型"]),
             "per_ping_load": float(
                 row["每坪建議負荷值 (kcal/h/坪)"]
             ),
@@ -658,6 +778,11 @@ if uploaded:
                 str(row["室內機型號"]).strip()
                 if not pd.isna(row["室內機型號"])
                 else ""
+            ),
+            "indoor_quantity": int(
+                row["室內機數量"]
+                if not pd.isna(row["室內機數量"])
+                else 1
             ),
             "indoor_capacity_kw": clean_optional_number(
                 row["室內機冷房能力 (kW)"]
@@ -686,7 +811,7 @@ if uploaded:
     m1, m2, m3 = st.columns(3)
     m1.metric("總面積", f"{total_area_m2:.2f} m²")
     m2.metric("總坪數", f"{total_area_ping:.2f} 坪")
-    m3.metric("總熱負荷", f"{total_load:,.2f} kcal/h")
+    m3.metric("總熱負荷", f"{total_load:,.2f} kW")
 
     with export_col:
         st.download_button(

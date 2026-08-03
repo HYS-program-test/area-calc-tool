@@ -1,0 +1,47 @@
+{
+  "compile_schemas.py": "PASS",
+  "compile_openai_gateway.py": "PASS",
+  "compile_hvac.py": "PASS",
+  "compile_pdf_utils.py": "PASS",
+  "compile_floorplan_editor.py": "PASS",
+  "compile_app.py": "PASS",
+  "compile_equipment.py": "PASS",
+  "indoor_count": 5,
+  "outdoor_count": 4,
+  "indoor_models": [
+    "FXCQ20AVT",
+    "FXCQ40AVT",
+    "FXCQ80AVT",
+    "FXFSQ100AVT",
+    "FXVQ250NTL"
+  ],
+  "outdoor_models": [
+    "RXYQ18AYLT",
+    "RXYQ22ANYLT",
+    "RXYQ26ANYLT",
+    "RXYQ44AHYLT"
+  ],
+  "connection_models": {
+    "RXYQ18AYLT": [],
+    "RXYQ22ANYLT": [
+      "RXYQ10AYLT",
+      "RXYQ12AYLT"
+    ],
+    "RXYQ26ANYLT": [
+      "RXYQ12AYLT",
+      "RXYQ14AYLT"
+    ],
+    "RXYQ44AHYLT": [
+      "RXYQ12AYLT",
+      "RXYQ14AYLT",
+      "RXYQ18AYLT"
+    ]
+  },
+  "fixed_excel_path_used": true,
+  "equipment_uploader_removed": true,
+  "column_A_category": true,
+  "column_B_type": true,
+  "column_C_model": true,
+  "column_G_capacity": true,
+  "columns_IJK_connections": true
+}

@@ -1,0 +1,31 @@
+{
+  "compile_schemas.py": "PASS",
+  "compile_openai_gateway.py": "PASS",
+  "compile_hvac.py": "PASS",
+  "compile_pdf_utils.py": "PASS",
+  "compile_floorplan_editor.py": "PASS",
+  "compile_app.py": "PASS",
+  "compile_equipment.py": "PASS",
+  "native_room_list_no_html_dump": true,
+  "space_type_removed": true,
+  "total_heat_kw": true,
+  "equipment_excel_uploader": true,
+  "indoor_quantity_column": true,
+  "average_load_column": true,
+  "parsed_indoor_count": 3,
+  "parsed_outdoor_count": 3,
+  "indoor_recommendation": {
+    "model": "FXMQ80",
+    "capacity_kw": 9.0,
+    "quantity": 1
+  },
+  "example_connection_rate": 110.8,
+  "outdoor_recommendation": {
+    "model": "RXYQ26ANYLT",
+    "capacity_kw": 73.0,
+    "sheet": "Sheet1",
+    "connection_rate": 110.76923076923077,
+    "in_target_range": false,
+    "distance": 0.7692307692307736
+  }
+}
