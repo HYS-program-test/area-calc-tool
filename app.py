@@ -351,7 +351,7 @@ if uploaded:
         )
 
     if uploaded.name.lower().endswith(".pdf"):
-        image, meta = render_pdf_page(data, int(page_no) - 1, 220)
+        image, meta = render_pdf_page(data, int(page_no) - 1, 260)
         render_note = (
             f"建築裁切方式：{meta['method']}；"
             f"輸出：{meta['output_size_pixels'][0]} × "
@@ -374,6 +374,8 @@ if uploaded:
                 st.session_state.get("editor_revision", 0) + 1
             )
             st.success(f"完成，共辨識 {len(result.rooms)} 個區域")
+            if result.room_count_check:
+                st.info(f"AI 自我檢查：{result.room_count_check}")
         except Exception as exc:
             st.error(str(exc))
 
