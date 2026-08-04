@@ -17,10 +17,10 @@ canvas{position:absolute;left:0;top:0}
 </head>
 <body>
 <div class="toolbar">
-  <button id="selectBtn" class="active">選取／移動</button>
+  <button id="selectBtn" class="active">選取／移動／拖曳角點調整</button>
   <button id="addBtn">新增</button>
   <button id="deleteBtn">刪除</button>
-  <button id="stretchBtn">拉伸</button>
+  <button id="stretchBtn">整體放大10%</button>
   <span>改色</span>
   <button class="color" data-color="#ef4444" style="background:#ef4444"></button>
   <button class="color" data-color="#f97316" style="background:#f97316"></button>
@@ -71,10 +71,11 @@ let rooms = [];
 let zoom = 0.60;
 let mode = "select";
 let selected = 0;
-let drag = null;
+let dragTarget = null; // {type:"vertex", vertexIndex} 或 {type:"move", last:{x,y}}
 let addStart = null;
-let initialized = false;
-let lastExternalRevision = null;
+
+const VERTEX_HIT_RADIUS = 12; // canvas 座標空間的像素容許誤差（跟 zoom 無關，pointerPosition 已經除過 zoom）
+const VERTEX_HOVER_RADIUS = 12;
 
 const holder = document.getElementById("holder");
 const bg = document.getElementById("bg");
@@ -139,11 +140,15 @@ function draw() {
     fctx.fillText(room.name || `區域${room.id}`, c.x - 35, c.y);
 
     if (index === selected) {
-      pts.forEach(p => {
-        fctx.fillStyle = "white";
-        fctx.fillRect(p.x - 6, p.y - 6, 12, 12);
+      pts.forEach((p, vertexIndex) => {
+        const isDragging = dragTarget
+          && dragTarget.type === "vertex"
+          && dragTarget.vertexIndex === vertexIndex;
+        fctx.fillStyle = isDragging ? "#2563eb" : "white";
+        fctx.fillRect(p.x - 7, p.y - 7, 14, 14);
         fctx.strokeStyle = "#2563eb";
-        fctx.strokeRect(p.x - 6, p.y - 6, 12, 12);
+        fctx.lineWidth = 2;
+        fctx.strokeRect(p.x - 7, p.y - 7, 14, 14);
       });
     }
   });
@@ -172,6 +177,18 @@ function pointerPosition(event) {
   };
 }
 
+function findVertexAt(room, p) {
+  const pts = room.points.map(normToPx);
+  for (let i = 0; i < pts.length; i++) {
+    const dx = p.x - pts[i].x;
+    const dy = p.y - pts[i].y;
+    if (Math.hypot(dx, dy) <= VERTEX_HIT_RADIUS) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 fg.addEventListener("mousedown", event => {
   const p = pointerPosition(event);
 
@@ -180,10 +197,20 @@ fg.addEventListener("mousedown", event => {
     return;
   }
 
+  // 先檢查是不是點到目前選取房間的角落控制點（拖曳調整大小/形狀用）
+  if (rooms[selected]) {
+    const vertexIndex = findVertexAt(rooms[selected], p);
+    if (vertexIndex !== -1) {
+      dragTarget = { type: "vertex", vertexIndex };
+      return;
+    }
+  }
+
+  // 沒點到控制點，才檢查是否點進某個房間本體（移動整個形狀）
   for (let i = rooms.length - 1; i >= 0; i--) {
     if (pointInPoly(p, rooms[i])) {
       selected = i;
-      drag = { last: p };
+      dragTarget = { type: "move", last: p };
       draw();
       return;
     }
@@ -191,19 +218,36 @@ fg.addEventListener("mousedown", event => {
 });
 
 fg.addEventListener("mousemove", event => {
-  if (!drag || mode !== "select" || !rooms[selected]) return;
-
+  if (mode !== "select") return;
   const p = pointerPosition(event);
-  const dx = p.x - drag.last.x;
-  const dy = p.y - drag.last.y;
+
+  // 滑鼠移到控制點附近時換成調整大小的游標，提示可以拖曳
+  if (!dragTarget && rooms[selected]) {
+    const hoverIndex = findVertexAt(rooms[selected], p);
+    fg.style.cursor = hoverIndex !== -1 ? "nwse-resize" : "default";
+  }
+
+  if (!dragTarget || !rooms[selected]) return;
+
+  if (dragTarget.type === "vertex") {
+    rooms[selected].points[dragTarget.vertexIndex] = pxToNorm(p);
+    draw();
+    send();
+    return;
+  }
+
+  // type === "move"：拖曳空間內部，整個形狀平移
+  const dx = p.x - dragTarget.last.x;
+  const dy = p.y - dragTarget.last.y;
 
   rooms[selected].points = rooms[selected].points.map(point => {
     const px = normToPx(point);
     return pxToNorm({ x: px.x + dx, y: px.y + dy });
   });
 
-  drag.last = p;
+  dragTarget.last = p;
   draw();
+  send();
 });
 
 fg.addEventListener("mouseup", event => {
@@ -246,10 +290,7 @@ fg.addEventListener("mouseup", event => {
     send();
   }
 
-  if (drag && mode === "select") {
-    send();
-  }
-  drag = null;
+  dragTarget = null;
 });
 
 selectBtn.onclick = () => {
@@ -324,18 +365,8 @@ window.addEventListener("message", event => {
   }
 
   const args = data.args;
-  const incomingRevision = args.revision ?? 0;
-
-  // Streamlit reruns after setComponentValue(). Do not overwrite the
-  // editor's current local polygons with an older payload during that rerun.
-  if (!initialized || incomingRevision !== lastExternalRevision) {
-    rooms = JSON.parse(JSON.stringify(args.rooms || []));
-    zoom = Number(args.zoom || 0.60);
-    lastExternalRevision = incomingRevision;
-    initialized = true;
-  }
-
-  const requestedImage = args.image_data_url;
+  rooms = JSON.parse(JSON.stringify(args.rooms || []));
+  zoom = Number(args.zoom || 0.60);
 
   image.onload = () => {
     bg.width = fg.width = image.width;
@@ -349,11 +380,7 @@ window.addEventListener("message", event => {
     setFrameHeight(700);
   };
 
-  if (image.src !== requestedImage) {
-    image.src = requestedImage;
-  } else if (image.complete) {
-    image.onload();
-  }
+  image.src = args.image_data_url;
 });
 
 componentReady();

@@ -9,6 +9,7 @@ import streamlit as st
 from PIL import Image
 
 from floorplan_editor import floorplan_editor
+from outdoor_grouping import outdoor_grouping
 from equipment import (
     DEFAULT_EQUIPMENT_FILENAME,
     load_vrv_equipment,
@@ -542,36 +543,94 @@ if uploaded:
         / pd.to_numeric(df["面積 (坪)"], errors="coerce").replace(0, pd.NA)
     ).round(2)
 
-    # One VRV outdoor unit is selected for the current group of indoor units.
-    if outdoor_units and not df.empty:
-        indoor_rows_for_outdoor = [
-            {
-                "indoor_model": str(row["室內機型號"]),
-                "indoor_quantity": int(row["室內機數量"] or 1),
-            }
-            for _, row in df.iterrows()
-            if str(row["室內機型號"]).strip()
-        ]
-        outdoor_recommendation = recommend_outdoor(
-            indoor_rows_for_outdoor,
-            outdoor_units,
-            min_rate=105.0,
-            max_rate=110.0,
-        )
-        if outdoor_recommendation.get("model"):
-            df["室外機型號"] = outdoor_recommendation["model"]
-            df["連結率 (%)"] = round(
-                outdoor_recommendation["connection_rate"],
-                1,
-            )
+    # 室外機分組：支援一層樓有一台或多台室外機，可用合併儲存格自由調整哪幾個房間
+    # 屬於同一組，連結率／推薦室外機型號依分組即時重算。
+    total_rooms = len(df)
+    room_sig = tuple(str(v) for v in df["編號"].tolist()) if not df.empty else ()
 
-            for room in room_by_id_for_selection.values():
-                if not room.get("outdoor_model"):
-                    room["outdoor_model"] = outdoor_recommendation["model"]
-                    room["connection_rate"] = round(
-                        outdoor_recommendation["connection_rate"],
-                        1,
-                    )
+    if st.session_state.get("outdoor_group_room_sig") != room_sig:
+        st.session_state["outdoor_group_room_sig"] = room_sig
+        st.session_state["outdoor_group_starts"] = {0} if total_rooms else set()
+        st.session_state["outdoor_group_revision"] = (
+            st.session_state.get("outdoor_group_revision", 0) + 1
+        )
+
+    group_starts = st.session_state.get("outdoor_group_starts", {0})
+
+    def _build_groups(starts_sorted, total):
+        groups = []
+        for i, start in enumerate(starts_sorted):
+            end = starts_sorted[i + 1] - 1 if i + 1 < len(starts_sorted) else total - 1
+            groups.append((start, end))
+        return groups
+
+    outdoor_model_col = [""] * total_rooms
+    connection_rate_col = [None] * total_rooms
+
+    if outdoor_units and total_rooms:
+        starts_sorted = sorted(group_starts)
+        for (start, end) in _build_groups(starts_sorted, total_rooms):
+            group_df = df.iloc[start:end + 1]
+            indoor_rows_for_outdoor = [
+                {
+                    "indoor_model": str(row["室內機型號"]),
+                    "indoor_quantity": int(row["室內機數量"] or 1),
+                }
+                for _, row in group_df.iterrows()
+                if str(row["室內機型號"]).strip()
+            ]
+            rec = recommend_outdoor(
+                indoor_rows_for_outdoor,
+                outdoor_units,
+                min_rate=105.0,
+                max_rate=110.0,
+            )
+            model = rec.get("model") or ""
+            rate = (
+                round(rec["connection_rate"], 1)
+                if rec.get("connection_rate") is not None
+                else None
+            )
+            for i in range(start, end + 1):
+                outdoor_model_col[i] = model
+                connection_rate_col[i] = rate
+
+    df["室外機型號"] = outdoor_model_col
+    df["連結率 (%)"] = connection_rate_col
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        room = room_by_id_for_selection.get(str(row["編號"]))
+        if room is not None:
+            room["outdoor_model"] = outdoor_model_col[i]
+            room["connection_rate"] = connection_rate_col[i]
+
+    if total_rooms:
+        st.markdown('<div class="section-label">室外機分組</div>', unsafe_allow_html=True)
+        st.caption(
+            "拖曳虛線把手調整哪幾個房間屬於同一台室外機；點房間名稱可新增分組；"
+            "點把手上方的 × 可合併。連結率會依分組即時重算。"
+        )
+        grouping_rows_payload = [
+            {
+                "index": i,
+                "label": str(df.iloc[i]["區域名稱"]),
+                "is_split": i in group_starts,
+                "outdoor_model": outdoor_model_col[i],
+                "connection_rate": connection_rate_col[i],
+            }
+            for i in range(total_rooms)
+        ]
+        grouping_value = outdoor_grouping(
+            rows=grouping_rows_payload,
+            revision=st.session_state.get("outdoor_group_revision", 0),
+            key="outdoor_grouping_main",
+        )
+        if isinstance(grouping_value, dict) and "splits" in grouping_value:
+            new_starts = {item["index"] for item in grouping_value["splits"]}
+            new_starts.add(0)
+            if new_starts != group_starts:
+                st.session_state["outdoor_group_starts"] = new_starts
+                st.rerun()
 
     st.session_state["rooms"] = list(
         room_by_id_for_selection.values()
@@ -675,6 +734,8 @@ if uploaded:
             "面積 (坪)",
             "總熱負荷 (kW)",
             "平均負荷 (kW/坪)",
+            "室外機型號",
+            "連結率 (%)",
         ],
         column_config={
             "編號": st.column_config.NumberColumn(
@@ -742,14 +803,16 @@ if uploaded:
             ),
             "室外機型號": st.column_config.TextColumn(
                 "室外機型號",
+                disabled=True,
                 width="medium",
+                help="由上方「室外機分組」決定，不在這裡直接編輯",
             ),
             "連結率 (%)": st.column_config.NumberColumn(
                 "連結率 (%)",
-                min_value=0.0,
-                step=1.0,
+                disabled=True,
                 format="%.1f",
                 width="small",
+                help="由上方「室外機分組」決定，不在這裡直接編輯",
             ),
         },
         key="hvac_result_editor",
@@ -788,14 +851,6 @@ if uploaded:
             ),
             "indoor_capacity_kw": clean_optional_number(
                 row["室內機冷房能力 (kW)"]
-            ),
-            "outdoor_model": (
-                str(row["室外機型號"]).strip()
-                if not pd.isna(row["室外機型號"])
-                else ""
-            ),
-            "connection_rate": clean_optional_number(
-                row["連結率 (%)"]
             ),
         }
 
