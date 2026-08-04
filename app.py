@@ -427,7 +427,12 @@ if uploaded:
 
     if isinstance(editor_value, dict) and "rooms" in editor_value:
         edited_rooms = editor_value["rooms"]
-        st.session_state["rooms"] = edited_rooms
+        if edited_rooms != st.session_state.get("rooms"):
+            # 元件真的回傳了新資料（不是上一輪殘留的舊回傳值）才更新＋重新整理，
+            # 這樣下一輪會用「剛剛更新過的最新資料」當作元件的顯示內容，
+            # 不會再發生「這一輪傳給元件的還是更新前的舊資料，把剛剛的變更蓋回去」的問題。
+            st.session_state["rooms"] = edited_rooms
+            st.rerun()
     else:
         edited_rooms = st.session_state.get("rooms", rooms)
 
