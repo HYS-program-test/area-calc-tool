@@ -387,8 +387,6 @@ if uploaded:
                 st.session_state.get("editor_revision", 0) + 1
             )
             st.success(f"完成，共辨識 {len(result.rooms)} 個區域")
-            if result.room_count_check:
-                st.info(f"AI 自我檢查：{result.room_count_check}")
         except Exception as exc:
             st.error(str(exc))
 
