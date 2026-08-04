@@ -11,9 +11,10 @@ from PIL import Image
 from floorplan_editor import floorplan_editor
 from equipment import (
     DEFAULT_EQUIPMENT_FILENAME,
-    load_vrv_equipment,
+    load_equipment,
     recommend_indoor,
     recommend_outdoor,
+    find_closest_outdoor_1to1,
 )
 from hvac import calculate_rows
 from openai_gateway import analyze_floorplan
@@ -496,14 +497,23 @@ if uploaded:
 
     indoor_units = []
     outdoor_units = []
+    home_indoor_units = []
+    home_outdoor_units = []
+    commercial_indoor_units = []
+    commercial_outdoor_units = []
 
     try:
-        indoor_units, outdoor_units = load_vrv_equipment(
-            EQUIPMENT_FILE
-        )
+        equipment = load_equipment(EQUIPMENT_FILE)
+        indoor_units = equipment["vrv_indoor"]
+        outdoor_units = equipment["vrv_outdoor"]
+        home_indoor_units = equipment["home_indoor"]
+        home_outdoor_units = equipment["home_outdoor"]
+        commercial_indoor_units = equipment["commercial_indoor"]
+        commercial_outdoor_units = equipment["commercial_outdoor"]
         st.sidebar.success(
-            f"設備表已載入：室內機 {len(indoor_units)} 筆、"
-            f"室外機 {len(outdoor_units)} 筆"
+            f"設備表已載入：VRV 室內機 {len(indoor_units)} 筆、室外機 {len(outdoor_units)} 筆；"
+            f"家用一對一 室內機 {len(home_indoor_units)} 筆、室外機 {len(home_outdoor_units)} 筆；"
+            f"商用一對一 室內機 {len(commercial_indoor_units)} 筆、室外機 {len(commercial_outdoor_units)} 筆"
         )
     except FileNotFoundError:
         st.sidebar.warning(
@@ -561,22 +571,32 @@ if uploaded:
         / pd.to_numeric(df["面積 (坪)"], errors="coerce").replace(0, pd.NA)
     ).round(2)
 
-    # 室外機配對：相同顏色的房間視為同一台室外機。顏色圖面／房間列表／下方選機表
-    # 三邊互相同步（顏色的唯一真實來源是 room["color"]，這裡只是讀出來顯示）；
-    # 室外機型號／連結率則是按下「確認」才會依目前的顏色分組重新配對，不會即時自動變動。
+    # 室外機配對：VRV 維持「相同顏色視為同一台室外機」＋連結率算法；
+    # 家用一對一／商用一對一則是每間房間各自獨立配對（跟顏色分組無關，配對時也只會
+    # 在同一個家族裡找——家用只配家用室外機、商用只配商用室外機，不會互相搭配）。
+    # 顏色圖面／房間列表／下方選機表三邊互相同步（顏色的唯一真實來源是 room["color"]，
+    # 這裡只是讀出來顯示）；室外機型號／連結率則是按下「確認」才會重新配對，不會即時自動變動。
     total_rooms = len(df)
 
     if "outdoor_match_results" not in st.session_state:
-        st.session_state["outdoor_match_results"] = {}  # {顏色hex: {"model":str, "rate":float|None}}
+        st.session_state["outdoor_match_results"] = {}  # VRV：{顏色hex: {"model":str, "rate":float|None}}
+    if "oneone_match_results" not in st.session_state:
+        st.session_state["oneone_match_results"] = {}  # 一對一：{編號str: {"model":str}}
     match_results = st.session_state["outdoor_match_results"]
+    oneone_results = st.session_state["oneone_match_results"]
 
     outdoor_model_col = []
     connection_rate_col = []
     for _, row in df.iterrows():
-        result = match_results.get(row["顏色"])
-        if result:
-            outdoor_model_col.append(result.get("model") or "")
-            connection_rate_col.append(result.get("rate"))
+        oneone_result = oneone_results.get(str(row["編號"]))
+        if oneone_result:
+            outdoor_model_col.append(oneone_result.get("model") or "")
+            connection_rate_col.append(None)  # 一對一沒有連結率這個概念
+            continue
+        vrv_result = match_results.get(row["顏色"])
+        if vrv_result:
+            outdoor_model_col.append(vrv_result.get("model") or "")
+            connection_rate_col.append(vrv_result.get("rate"))
         else:
             outdoor_model_col.append("")
             connection_rate_col.append(None)
@@ -594,14 +614,45 @@ if uploaded:
         st.markdown('<div class="section-label">室外機配對</div>', unsafe_allow_html=True)
         st.caption(
             "圖面／房間列表／下方選機表的顏色互相同步（改任一邊都會連動其他兩邊）。"
-            "相同顏色的房間視為接同一台室外機；顏色調整好之後按下面的「確認」，"
-            "系統才會依目前的顏色分組重新配對室外機、計算連結率——改顏色本身不會自動觸發配對。"
+            "VRV：相同顏色的房間視為接同一台室外機，依分組算連結率。"
+            "家用一對一／商用一對一：每間房間各自配對自己的室外機，跟顏色分組無關，"
+            "也不會跨家用／商用互相搭配。顏色調整好之後按下面的「確認」，系統才會重新配對——"
+            "改顏色本身不會自動觸發配對。"
         )
-        if st.button("✅ 確認：依顏色分組配對室外機", key="confirm_outdoor_match_btn"):
-            new_results = {}
+        if st.button("✅ 確認：配對室外機", key="confirm_outdoor_match_btn"):
+
+            def _classify_family(indoor_model: str) -> str | None:
+                model_clean = indoor_model.strip().upper()
+                if not model_clean:
+                    return None
+                for u in indoor_units:
+                    if u["model"].strip().upper() == model_clean:
+                        return "vrv"
+                for u in home_indoor_units:
+                    if u["model"].strip().upper() == model_clean:
+                        return "home"
+                for u in commercial_indoor_units:
+                    if u["model"].strip().upper() == model_clean:
+                        return "commercial"
+                return None
+
+            new_vrv_results = {}
+            new_oneone_results = {}
+
+            # 先把每一列依室內機型號分類成 vrv / home / commercial / 不明
+            row_families = {}
+            for _, r in df.iterrows():
+                row_families[str(r["編號"])] = _classify_family(str(r["室內機型號"]))
+
+            # VRV：按顏色分組（只算被分類成 vrv 的那些列），沿用連結率邏輯
             if outdoor_units:
                 for color in df["顏色"].unique():
-                    group_df = df[df["顏色"] == color]
+                    group_df = df[
+                        (df["顏色"] == color)
+                        & (df["編號"].astype(str).map(row_families) == "vrv")
+                    ]
+                    if group_df.empty:
+                        continue
                     indoor_rows_for_outdoor = [
                         {
                             "indoor_model": str(r["室內機型號"]),
@@ -613,10 +664,11 @@ if uploaded:
                     rec = recommend_outdoor(
                         indoor_rows_for_outdoor,
                         outdoor_units,
+                        indoor_units,
                         min_rate=105.0,
                         max_rate=110.0,
                     )
-                    new_results[color] = {
+                    new_vrv_results[color] = {
                         "model": rec.get("model") or "",
                         "rate": (
                             round(rec["connection_rate"], 1)
@@ -624,7 +676,35 @@ if uploaded:
                             else None
                         ),
                     }
-            st.session_state["outdoor_match_results"] = new_results
+
+            # 家用一對一／商用一對一：每一列各自獨立配對，不管顏色
+            for _, r in df.iterrows():
+                family = row_families.get(str(r["編號"]))
+                indoor_model = str(r["室內機型號"]).strip()
+                if not indoor_model:
+                    continue
+                if family == "home":
+                    match = find_closest_outdoor_1to1(indoor_model, home_outdoor_units)
+                    new_oneone_results[str(r["編號"])] = {"model": match.get("model") or ""}
+                elif family == "commercial":
+                    match = find_closest_outdoor_1to1(indoor_model, commercial_outdoor_units)
+                    new_oneone_results[str(r["編號"])] = {"model": match.get("model") or ""}
+
+            st.session_state["outdoor_match_results"] = new_vrv_results
+            st.session_state["oneone_match_results"] = new_oneone_results
+
+            # 同色的房間排在一起（穩定排序：同色內維持原本相對順序），
+            # 房間列表跟下面的試算表都是從 st.session_state["rooms"] 這個順序畫出來的，
+            # 所以排這裡兩邊會一起變。（一對一房間也會照顏色一起排到視覺上，
+            # 但室外機配對本身跟顏色無關，純粹排序方便看。）
+            sorted_df = df.sort_values("顏色", kind="stable")
+            new_rooms_order = []
+            for rid in sorted_df["編號"].tolist():
+                room = room_by_id_for_selection.get(str(rid))
+                if room is not None:
+                    new_rooms_order.append(room)
+            st.session_state["rooms"] = new_rooms_order
+
             st.rerun()
 
     st.session_state["rooms"] = list(
@@ -677,7 +757,7 @@ if uploaded:
                         )
                     with text_col:
                         st.markdown(
-                            f"**{row['區域名稱']}**  \\n"
+                            f"**{row['區域名稱']}**  \n"
                             f"{row['面積 (m²)']:.2f} m²"
                         )
                     if idx < len(df) - 1:
