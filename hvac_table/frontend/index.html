@@ -12,14 +12,15 @@
   --muted: #6b7280;
   --bg: #f5f7fb;
 }
-html,body{margin:0;padding:0;font-family:Arial,"Microsoft JhengHei",sans-serif;background:#fff;color:var(--text)}
+html,body{margin:0;padding:0;font-family:Arial,"Microsoft JhengHei",sans-serif;background:#fff;color:var(--text);width:100%;max-width:100%;overflow-x:hidden;box-sizing:border-box}
 .hint{font-size:12px;color:var(--muted);padding:2px 2px 10px 2px;line-height:1.6}
 
 #stage{
   width:100%;
   max-width:100%;
   box-sizing:border-box;
-  overflow:auto;
+  overflow-x:auto;
+  overflow-y:auto;
   border:1px solid var(--border);
   border-radius:10px;
   max-height:640px;
@@ -106,14 +107,14 @@ function componentReady() { postToStreamlit("streamlit:componentReady", { apiVer
 function setComponentValue(value) { postToStreamlit("streamlit:setComponentValue", { value }); }
 function setFrameHeight(height = 500) { postToStreamlit("streamlit:setFrameHeight", { height }); }
 
-// 保險機制：元件剛掛載時，第一次的「調整高度」訊息偶爾會因為 Streamlit 那邊
-// 還沒完成註冊而被忽略（瀏覽器主控台會看到 "unregistered ComponentInstance" 警告），
-// 導致畫面容器維持在很小的高度、內容看起來像消失了。改成載入後短時間內重複補送幾次，
-// 就算第一次被漏接，後面幾次也會補上。
-function scheduleHeightRetries(getHeight) {
-  [50, 150, 400, 800, 1500].forEach(delay => {
-    setTimeout(() => setFrameHeight(getHeight()), delay);
-  });
+// #stage 本身就有固定的 CSS 高度上限（max-height:640px）＋內部自帶捲軸，
+// 外層不需要動態量測內容多高，用固定數字＋少量重試最單純、訊息量最少。
+// （曾經試過用 ResizeObserver 持續監看＋密集重試，但這樣反而讓「跟 Streamlit 溝通」
+// 的訊息量大增，懷疑是讓握手競速問題更容易發生的原因之一，所以改回單純版本。）
+const FIXED_HEIGHT = 750;
+function setupHeightSync() {
+  setFrameHeight(FIXED_HEIGHT);
+  [200, 800, 2000].forEach(delay => setTimeout(() => setFrameHeight(FIXED_HEIGHT), delay));
 }
 
 let rows = [];
@@ -320,8 +321,7 @@ function render() {
     i = j + 1;
   }
 
-  setFrameHeight(Math.min(640, Math.max(200, document.body.scrollHeight + 20)));
-  scheduleHeightRetries(() => Math.min(640, Math.max(200, document.body.scrollHeight + 20)));
+  setupHeightSync();
 }
 
 window.addEventListener("message", (event) => {
@@ -351,8 +351,7 @@ window.addEventListener("message", (event) => {
 });
 
 componentReady();
-setFrameHeight(500);
-scheduleHeightRetries(() => 500);
+setupHeightSync();
 </script>
 </body>
 </html>
