@@ -4,387 +4,343 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <style>
-html,body{margin:0;padding:0;font-family:Arial,"Microsoft JhengHei",sans-serif;background:white;color:#1f2937}
-.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px}
-button{padding:7px 10px;border:1px solid #d1d5db;border-radius:7px;background:white;cursor:pointer}
-button.active{border-color:#2563eb;background:#eff6ff;color:#2563eb}
-.color{width:28px;height:28px;padding:0}
-.stage{overflow:auto;border:1px solid #e5e7eb;border-radius:8px;height:610px;background:#fafafa}
-.canvas-holder{position:relative;transform-origin:top left}
-canvas{position:absolute;left:0;top:0}
-.small{font-size:13px;color:#6b7280}
+:root {
+  --blue: #2563eb;
+  --blue-pale: #eff6ff;
+  --border: #e5e7eb;
+  --text: #172033;
+  --muted: #6b7280;
+  --bg: #f5f7fb;
+}
+html,body{margin:0;padding:0;font-family:Arial,"Microsoft JhengHei",sans-serif;background:#fff;color:var(--text)}
+.hint{font-size:12px;color:var(--muted);padding:2px 2px 10px 2px;line-height:1.6}
+
+#stage{
+  width:100%;
+  max-width:100%;
+  box-sizing:border-box;
+  overflow:auto;
+  border:1px solid var(--border);
+  border-radius:10px;
+  max-height:640px;
+}
+
+table{ border-collapse:collapse; font-size:12.5px; width:max-content; }
+th{
+  position:sticky; top:0; background:#f9fafb; text-align:left; padding:8px 10px;
+  border-bottom:1px solid var(--border); font-size:11.5px; color:var(--muted);
+  white-space:nowrap; z-index:2;
+}
+td{ padding:6px 8px; border-bottom:1px solid #f1f3f5; vertical-align:middle; white-space:nowrap; }
+
+.readonly-cell{ color:#4b5563; }
+.num-cell{ text-align:right; }
+
+input[type=text], input[type=number]{
+  width:100%; box-sizing:border-box; font-size:12.5px; padding:5px 7px;
+  border:1px solid #dbe0e6; border-radius:6px; color:var(--text); outline:none;
+}
+input[type=text]:focus, input[type=number]:focus{ border-color:var(--blue); }
+input.name-input{ min-width:110px; }
+input.model-input{ min-width:130px; }
+input.num-input{ width:70px; text-align:right; }
+
+.swatch-wrap{ position:relative; display:inline-block; }
+.swatch-btn{
+  width:26px; height:26px; border-radius:7px; border:2px solid #fff;
+  box-shadow:0 0 0 1px var(--border); cursor:pointer;
+}
+.swatch-popup{
+  display:none; position:absolute; top:32px; left:0; z-index:20;
+  background:#fff; border:1px solid var(--border); border-radius:10px;
+  padding:8px; box-shadow:0 6px 18px rgba(0,0,0,0.12);
+  grid-template-columns:repeat(3, 24px); gap:6px;
+}
+.swatch-popup.open{ display:grid; }
+.swatch-option{
+  width:24px; height:24px; border-radius:6px; cursor:pointer; border:2px solid transparent;
+}
+.swatch-option.selected{ border-color:var(--text); }
+
+.merge-cell{
+  text-align:center; background:#fafcff; border-left:1px solid var(--border);
+}
+.merge-cell .model{ font-weight:700; }
+.merge-cell .rate{ font-size:11.5px; color:var(--muted); margin-top:2px; }
+.merge-cell .rate.warn{ color:#b45309; }
+.merge-cell .empty{ color:#c7ccd1; font-size:11.5px; }
 </style>
 </head>
 <body>
-<div class="toolbar">
-  <button id="selectBtn" class="active">選取／移動／拖曳角點調整</button>
-  <button id="addBtn">新增</button>
-  <button id="deleteBtn">刪除</button>
-  <button id="stretchBtn">整體放大10%</button>
-  <span>改色</span>
-  <button class="color" data-color="#ef4444" style="background:#ef4444"></button>
-  <button class="color" data-color="#f97316" style="background:#f97316"></button>
-  <button class="color" data-color="#f59e0b" style="background:#f59e0b"></button>
-  <button class="color" data-color="#22c55e" style="background:#22c55e"></button>
-  <button class="color" data-color="#3b82f6" style="background:#3b82f6"></button>
-  <button class="color" data-color="#a855f7" style="background:#a855f7"></button>
-  <span class="small">縮放</span>
-  <button id="minusBtn">－</button>
-  <strong id="zoomLabel">60%</strong>
-  <button id="plusBtn">＋</button>
-  <button id="resetBtn">重置 60%</button>
-</div>
 
-<div class="stage">
-  <div class="canvas-holder" id="holder">
-    <canvas id="bg"></canvas>
-    <canvas id="fg"></canvas>
-  </div>
+<div class="hint">顏色欄可直接選色，跟圖面／房間列表同步；室外機型號／連結率是合併儲存格，由「室外機配對」確認後的結果決定，這裡唯讀。</div>
+<div id="stage">
+  <table>
+    <thead>
+      <tr>
+        <th>編號</th>
+        <th>顏色</th>
+        <th>區域名稱</th>
+        <th>面積(m²)</th>
+        <th>面積(坪)</th>
+        <th>每坪建議負荷(kcal/h/坪)</th>
+        <th>總熱負荷(kW)</th>
+        <th>室內機型號</th>
+        <th>數量</th>
+        <th>室內機冷房能力(kW)</th>
+        <th>平均負荷(kW/坪)</th>
+        <th>室外機型號／連結率</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
 </div>
 
 <script>
-const STREAMLIT_MESSAGE_TYPE = "streamlit:componentReady";
 const RENDER_EVENT = "streamlit:render";
-const SET_VALUE = "streamlit:setComponentValue";
-const SET_HEIGHT = "streamlit:setFrameHeight";
 
 function postToStreamlit(type, payload = {}) {
-  window.parent.postMessage(
-    { isStreamlitMessage: true, type, ...payload },
-    "*"
-  );
+  window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, "*");
 }
+function componentReady() { postToStreamlit("streamlit:componentReady", { apiVersion: 1 }); }
+function setComponentValue(value) { postToStreamlit("streamlit:setComponentValue", { value }); }
+function setFrameHeight(height = 500) { postToStreamlit("streamlit:setFrameHeight", { height }); }
 
-function componentReady() {
-  postToStreamlit(STREAMLIT_MESSAGE_TYPE, { apiVersion: 1 });
+let rows = [];
+let palette = [];
+let nonceCounter = 0;
+const stage = document.getElementById("stage");
+const tbody = document.getElementById("tbody");
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
 }
-
-function setComponentValue(value) {
-  postToStreamlit(SET_VALUE, { value });
-}
-
-function setFrameHeight(height = 700) {
-  postToStreamlit(SET_HEIGHT, { height });
-}
-
-let rooms = [];
-let zoom = 0.60;
-let mode = "select";
-let selected = 0;
-let dragTarget = null; // {type:"vertex", vertexIndex} 或 {type:"move", last:{x,y}}
-let addStart = null;
-
-const VERTEX_HIT_RADIUS = 12; // canvas 座標空間的像素容許誤差（跟 zoom 無關，pointerPosition 已經除過 zoom）
-const VERTEX_HOVER_RADIUS = 12;
-
-const holder = document.getElementById("holder");
-const bg = document.getElementById("bg");
-const fg = document.getElementById("fg");
-const bctx = bg.getContext("2d");
-const fctx = fg.getContext("2d");
-const image = new Image();
 
 function send() {
-  setComponentValue({ rooms, zoom });
+  nonceCounter += 1;
+  const updates = rows.map(r => ({
+    room_id: r.roomId,
+    name: r.name,
+    color: r.color,
+    per_ping_load: r.perPingLoad,
+    indoor_model: r.indoorModel,
+    indoor_quantity: r.indoorQuantity,
+    indoor_capacity_kw: r.indoorCapacityKw,
+  }));
+  setComponentValue({ updates, nonce: nonceCounter });
 }
 
-function normToPx(p) {
-  return { x: p.x / 1000 * fg.width, y: p.y / 1000 * fg.height };
+function closeAllSwatchPopups() {
+  document.querySelectorAll(".swatch-popup.open").forEach(p => p.classList.remove("open"));
 }
 
-function pxToNorm(p) {
-  return { x: p.x / fg.width * 1000, y: p.y / fg.height * 1000 };
-}
-
-function centroid(room) {
-  const pts = room.points.map(normToPx);
-  return {
-    x: pts.reduce((sum, p) => sum + p.x, 0) / pts.length,
-    y: pts.reduce((sum, p) => sum + p.y, 0) / pts.length
-  };
-}
-
-function applyZoom(notify = true) {
-  holder.style.transform = `scale(${zoom})`;
-  holder.style.width = `${image.width * zoom}px`;
-  holder.style.height = `${image.height * zoom}px`;
-  document.getElementById("zoomLabel").textContent =
-    `${Math.round(zoom * 100)}%`;
-  if (notify) send();
-}
-
-function draw() {
-  fctx.clearRect(0, 0, fg.width, fg.height);
-
-  rooms.forEach((room, index) => {
-    const pts = room.points.map(normToPx);
-    if (pts.length < 3) return;
-
-    fctx.beginPath();
-    fctx.moveTo(pts[0].x, pts[0].y);
-    pts.slice(1).forEach(p => fctx.lineTo(p.x, p.y));
-    fctx.closePath();
-
-    fctx.globalAlpha = 0.18;
-    fctx.fillStyle = room.color || "#ef4444";
-    fctx.fill();
-    fctx.globalAlpha = 1;
-
-    fctx.lineWidth = index === selected ? 7 : 4;
-    fctx.strokeStyle = room.color || "#ef4444";
-    fctx.stroke();
-
-    const c = centroid(room);
-    fctx.fillStyle = "#111";
-    fctx.font = "bold 22px Arial";
-    fctx.fillText(room.name || `區域${room.id}`, c.x - 35, c.y);
-
-    if (index === selected) {
-      pts.forEach((p, vertexIndex) => {
-        const isDragging = dragTarget
-          && dragTarget.type === "vertex"
-          && dragTarget.vertexIndex === vertexIndex;
-        fctx.fillStyle = isDragging ? "#2563eb" : "white";
-        fctx.fillRect(p.x - 7, p.y - 7, 14, 14);
-        fctx.strokeStyle = "#2563eb";
-        fctx.lineWidth = 2;
-        fctx.strokeRect(p.x - 7, p.y - 7, 14, 14);
-      });
+// 事件代理：監聽器只在 #stage 上綁一次，不管 tbody 重繪幾次都不會漏接點擊
+// （原本是每次 render() 都對新產生的 DOM 元素重新綁 addEventListener，
+//  如果使用者剛好在重繪的瞬間點擊，那個當下新元素還沒綁好事件，點擊就會落空）
+stage.addEventListener("click", (e) => {
+  const option = e.target.closest(".swatch-option");
+  if (option) {
+    e.stopPropagation();
+    const roomId = Number(option.dataset.roomId);
+    const color = option.dataset.color;
+    const row = rows.find(r => r.roomId === roomId);
+    if (row) {
+      row.color = color;
+      closeAllSwatchPopups();
+      render();
+      send();
     }
-  });
-}
-
-function pointInPoly(pt, room) {
-  const vs = room.points.map(normToPx);
-  let inside = false;
-
-  for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-    const xi = vs[i].x, yi = vs[i].y;
-    const xj = vs[j].x, yj = vs[j].y;
-    const intersect =
-      ((yi > pt.y) !== (yj > pt.y)) &&
-      (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function pointerPosition(event) {
-  const rect = fg.getBoundingClientRect();
-  return {
-    x: (event.clientX - rect.left) / zoom,
-    y: (event.clientY - rect.top) / zoom
-  };
-}
-
-function findVertexAt(room, p) {
-  const pts = room.points.map(normToPx);
-  for (let i = 0; i < pts.length; i++) {
-    const dx = p.x - pts[i].x;
-    const dy = p.y - pts[i].y;
-    if (Math.hypot(dx, dy) <= VERTEX_HIT_RADIUS) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-fg.addEventListener("mousedown", event => {
-  const p = pointerPosition(event);
-
-  if (mode === "add") {
-    addStart = p;
     return;
   }
 
-  // 先檢查是不是點到目前選取房間的角落控制點（拖曳調整大小/形狀用）
-  if (rooms[selected]) {
-    const vertexIndex = findVertexAt(rooms[selected], p);
-    if (vertexIndex !== -1) {
-      dragTarget = { type: "vertex", vertexIndex };
-      return;
-    }
-  }
-
-  // 沒點到控制點，才檢查是否點進某個房間本體（移動整個形狀）
-  for (let i = rooms.length - 1; i >= 0; i--) {
-    if (pointInPoly(p, rooms[i])) {
-      selected = i;
-      dragTarget = { type: "move", last: p };
-      draw();
-      return;
-    }
+  const btn = e.target.closest(".swatch-btn");
+  if (btn) {
+    e.stopPropagation();
+    const roomId = Number(btn.dataset.roomId);
+    const popup = tbody.querySelector(`.swatch-popup[data-room-id="${roomId}"]`);
+    const wasOpen = popup && popup.classList.contains("open");
+    closeAllSwatchPopups();
+    if (popup && !wasOpen) popup.classList.add("open");
   }
 });
 
-fg.addEventListener("mousemove", event => {
-  if (mode !== "select") return;
-  const p = pointerPosition(event);
+document.addEventListener("click", () => closeAllSwatchPopups());
 
-  // 滑鼠移到控制點附近時換成調整大小的游標，提示可以拖曳
-  if (!dragTarget && rooms[selected]) {
-    const hoverIndex = findVertexAt(rooms[selected], p);
-    fg.style.cursor = hoverIndex !== -1 ? "nwse-resize" : "default";
-  }
+function buildSwatchCellHtml(row) {
+  const options = palette.map(color => `
+    <div class="swatch-option${color === row.color ? " selected" : ""}"
+         data-room-id="${row.roomId}" data-color="${color}"
+         style="background:${color}"></div>
+  `).join("");
+  return `
+    <div class="swatch-wrap">
+      <div class="swatch-btn" data-room-id="${row.roomId}" style="background:${row.color}"></div>
+      <div class="swatch-popup" data-room-id="${row.roomId}">${options}</div>
+    </div>
+  `;
+}
 
-  if (!dragTarget || !rooms[selected]) return;
+function render() {
+  tbody.innerHTML = "";
 
-  if (dragTarget.type === "vertex") {
-    rooms[selected].points[dragTarget.vertexIndex] = pxToNorm(p);
-    draw();
-    send();
-    return;
-  }
+  // 找出合併儲存格的分組範圍：merge_group 連續相同就合併
+  let i = 0;
+  while (i < rows.length) {
+    let j = i;
+    while (j + 1 < rows.length && rows[j + 1].mergeGroup === rows[i].mergeGroup) {
+      j += 1;
+    }
+    const spanCount = j - i + 1;
 
-  // type === "move"：拖曳空間內部，整個形狀平移
-  const dx = p.x - dragTarget.last.x;
-  const dy = p.y - dragTarget.last.y;
+    for (let k = i; k <= j; k++) {
+      const r = rows[k];
+      const tr = document.createElement("tr");
 
-  rooms[selected].points = rooms[selected].points.map(point => {
-    const px = normToPx(point);
-    return pxToNorm({ x: px.x + dx, y: px.y + dy });
-  });
+      const tdId = document.createElement("td");
+      tdId.className = "readonly-cell num-cell";
+      tdId.textContent = r.roomId;
+      tr.appendChild(tdId);
 
-  dragTarget.last = p;
-  draw();
-  send();
-});
+      const tdColor = document.createElement("td");
+      tdColor.innerHTML = buildSwatchCellHtml(r);
+      tr.appendChild(tdColor);
 
-fg.addEventListener("mouseup", event => {
-  const p = pointerPosition(event);
+      const tdName = document.createElement("td");
+      const nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "name-input";
+      nameInput.value = r.name;
+      nameInput.addEventListener("input", e => { r.name = e.target.value; });
+      nameInput.addEventListener("change", send);
+      tdName.appendChild(nameInput);
+      tr.appendChild(tdName);
 
-  if (mode === "add" && addStart) {
-    const x1 = Math.min(addStart.x, p.x);
-    const y1 = Math.min(addStart.y, p.y);
-    const x2 = Math.max(addStart.x, p.x);
-    const y2 = Math.max(addStart.y, p.y);
+      const tdArea1 = document.createElement("td");
+      tdArea1.className = "readonly-cell num-cell";
+      tdArea1.textContent = r.areaM2.toFixed(2);
+      tr.appendChild(tdArea1);
 
-    if (x2 - x1 > 20 && y2 - y1 > 20) {
-      const id = rooms.length
-        ? Math.max(...rooms.map(room => room.id)) + 1
-        : 1;
+      const tdArea2 = document.createElement("td");
+      tdArea2.className = "readonly-cell num-cell";
+      tdArea2.textContent = r.areaPing.toFixed(2);
+      tr.appendChild(tdArea2);
 
-      rooms.push({
-        id,
-        name: `區域${id}`,
-        room_type: "一般辦公室",
-        confidence: 1,
-        color: "#3b82f6",
-        unit_load: 120,
-        included: true,
-        points: [
-          pxToNorm({ x: x1, y: y1 }),
-          pxToNorm({ x: x2, y: y1 }),
-          pxToNorm({ x: x2, y: y2 }),
-          pxToNorm({ x: x1, y: y2 })
-        ]
+      const tdLoad = document.createElement("td");
+      const loadInput = document.createElement("input");
+      loadInput.type = "number";
+      loadInput.className = "num-input";
+      loadInput.step = "10";
+      loadInput.value = r.perPingLoad;
+      loadInput.addEventListener("input", e => { r.perPingLoad = parseFloat(e.target.value) || 0; });
+      loadInput.addEventListener("change", send);
+      tdLoad.appendChild(loadInput);
+      tr.appendChild(tdLoad);
+
+      const tdHeat = document.createElement("td");
+      tdHeat.className = "readonly-cell num-cell";
+      tdHeat.textContent = r.totalHeatKw.toFixed(2);
+      tr.appendChild(tdHeat);
+
+      const tdIndoorModel = document.createElement("td");
+      const modelInput = document.createElement("input");
+      modelInput.type = "text";
+      modelInput.className = "model-input";
+      modelInput.value = r.indoorModel;
+      modelInput.addEventListener("input", e => { r.indoorModel = e.target.value; });
+      modelInput.addEventListener("change", send);
+      tdIndoorModel.appendChild(modelInput);
+      tr.appendChild(tdIndoorModel);
+
+      const tdQty = document.createElement("td");
+      const qtyInput = document.createElement("input");
+      qtyInput.type = "number";
+      qtyInput.className = "num-input";
+      qtyInput.min = "1";
+      qtyInput.step = "1";
+      qtyInput.value = r.indoorQuantity;
+      qtyInput.addEventListener("input", e => { r.indoorQuantity = parseInt(e.target.value) || 1; });
+      qtyInput.addEventListener("change", send);
+      tdQty.appendChild(qtyInput);
+      tr.appendChild(tdQty);
+
+      const tdCap = document.createElement("td");
+      const capInput = document.createElement("input");
+      capInput.type = "number";
+      capInput.className = "num-input";
+      capInput.step = "0.1";
+      capInput.value = (r.indoorCapacityKw === null || r.indoorCapacityKw === undefined) ? "" : r.indoorCapacityKw;
+      capInput.placeholder = "-";
+      capInput.addEventListener("input", e => {
+        r.indoorCapacityKw = e.target.value === "" ? null : (parseFloat(e.target.value) || 0);
       });
-      selected = rooms.length - 1;
+      capInput.addEventListener("change", send);
+      tdCap.appendChild(capInput);
+      tr.appendChild(tdCap);
+
+      const tdAvg = document.createElement("td");
+      tdAvg.className = "readonly-cell num-cell";
+      tdAvg.textContent = (r.averageLoad === null || r.averageLoad === undefined) ? "-" : r.averageLoad.toFixed(2);
+      tr.appendChild(tdAvg);
+
+      if (k === i) {
+        const tdMerge = document.createElement("td");
+        tdMerge.className = "merge-cell";
+        tdMerge.rowSpan = spanCount;
+        if (r.outdoorModel) {
+          const rateText = (r.connectionRate === null || r.connectionRate === undefined)
+            ? ""
+            : `連結率 ${r.connectionRate.toFixed(1)}%`;
+          const rateClass = (r.connectionRate !== null && r.connectionRate !== undefined
+            && (r.connectionRate < 100 || r.connectionRate > 130)) ? "rate warn" : "rate";
+          tdMerge.innerHTML = `
+            <div class="model">${escapeHtml(r.outdoorModel)}</div>
+            <div class="${rateClass}">${escapeHtml(rateText)}</div>
+          `;
+        } else {
+          tdMerge.innerHTML = `<div class="empty">尚未配對</div>`;
+        }
+        tr.appendChild(tdMerge);
+      }
+
+      tbody.appendChild(tr);
     }
 
-    addStart = null;
-    mode = "select";
-    selectBtn.classList.add("active");
-    addBtn.classList.remove("active");
-    draw();
-    send();
+    i = j + 1;
   }
 
-  dragTarget = null;
-});
+  setFrameHeight(Math.min(640, Math.max(200, document.body.scrollHeight + 20)));
+}
 
-selectBtn.onclick = () => {
-  mode = "select";
-  selectBtn.classList.add("active");
-  addBtn.classList.remove("active");
-};
-
-addBtn.onclick = () => {
-  mode = "add";
-  addBtn.classList.add("active");
-  selectBtn.classList.remove("active");
-};
-
-deleteBtn.onclick = () => {
-  if (!rooms.length) return;
-  rooms.splice(selected, 1);
-  selected = Math.max(0, selected - 1);
-  draw();
-  send();
-};
-
-stretchBtn.onclick = () => {
-  if (!rooms[selected]) return;
-  const c = centroid(rooms[selected]);
-
-  rooms[selected].points = rooms[selected].points.map(point => {
-    const p = normToPx(point);
-    return pxToNorm({
-      x: c.x + (p.x - c.x) * 1.10,
-      y: c.y + (p.y - c.y) * 1.10
-    });
-  });
-
-  draw();
-  send();
-};
-
-document.querySelectorAll(".color").forEach(button => {
-  button.onclick = () => {
-    if (!rooms[selected]) return;
-    rooms[selected].color = button.dataset.color;
-    draw();
-    send();
-  };
-});
-
-minusBtn.onclick = () => {
-  zoom = Math.max(0.20, zoom - 0.10);
-  applyZoom();
-};
-
-plusBtn.onclick = () => {
-  zoom = Math.min(1.50, zoom + 0.10);
-  applyZoom();
-};
-
-resetBtn.onclick = () => {
-  zoom = 0.60;
-  applyZoom();
-};
-
-window.addEventListener("message", event => {
+window.addEventListener("message", (event) => {
   const data = event.data;
-
-  if (
-    !data ||
-    data.type !== RENDER_EVENT ||
-    !data.args
-  ) {
-    return;
-  }
+  if (!data || data.type !== RENDER_EVENT || !data.args) return;
 
   const args = data.args;
-  rooms = JSON.parse(JSON.stringify(args.rooms || []));
-  zoom = Number(args.zoom || 0.60);
+  palette = args.palette || [];
+  rows = (args.rows || []).map(r => ({
+    roomId: r.room_id,
+    name: r.name || "",
+    color: r.color,
+    areaM2: r.area_m2 || 0,
+    areaPing: r.area_ping || 0,
+    perPingLoad: r.per_ping_load || 0,
+    totalHeatKw: r.total_heat_kw || 0,
+    indoorModel: r.indoor_model || "",
+    indoorQuantity: r.indoor_quantity || 1,
+    indoorCapacityKw: (r.indoor_capacity_kw === undefined) ? null : r.indoor_capacity_kw,
+    averageLoad: (r.average_load === undefined) ? null : r.average_load,
+    outdoorModel: r.outdoor_model || "",
+    connectionRate: (r.connection_rate === undefined) ? null : r.connection_rate,
+    mergeGroup: r.merge_group,
+  }));
 
-  image.onload = () => {
-    bg.width = fg.width = image.width;
-    bg.height = fg.height = image.height;
-    holder.style.width = `${image.width}px`;
-    holder.style.height = `${image.height}px`;
-    bctx.clearRect(0, 0, bg.width, bg.height);
-    bctx.drawImage(image, 0, 0);
-    applyZoom(false);
-    draw();
-    setFrameHeight(700);
-  };
-
-  image.src = args.image_data_url;
+  render();
 });
 
 componentReady();
-setFrameHeight(700);
+setFrameHeight(500);
 </script>
 </body>
 </html>
