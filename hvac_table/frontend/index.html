@@ -15,9 +15,17 @@
 html,body{margin:0;padding:0;font-family:Arial,"Microsoft JhengHei",sans-serif;background:#fff;color:var(--text)}
 .hint{font-size:12px;color:var(--muted);padding:2px 2px 10px 2px;line-height:1.6}
 
-#stage{ overflow:auto; border:1px solid var(--border); border-radius:10px; max-height:640px; }
+#stage{
+  width:100%;
+  max-width:100%;
+  box-sizing:border-box;
+  overflow:auto;
+  border:1px solid var(--border);
+  border-radius:10px;
+  max-height:640px;
+}
 
-table{ border-collapse:collapse; font-size:12.5px; width:max-content; min-width:100%; }
+table{ border-collapse:collapse; font-size:12.5px; width:max-content; }
 th{
   position:sticky; top:0; background:#f9fafb; text-align:left; padding:8px 10px;
   border-bottom:1px solid var(--border); font-size:11.5px; color:var(--muted);
@@ -98,9 +106,20 @@ function componentReady() { postToStreamlit("streamlit:componentReady", { apiVer
 function setComponentValue(value) { postToStreamlit("streamlit:setComponentValue", { value }); }
 function setFrameHeight(height = 500) { postToStreamlit("streamlit:setFrameHeight", { height }); }
 
+// 保險機制：元件剛掛載時，第一次的「調整高度」訊息偶爾會因為 Streamlit 那邊
+// 還沒完成註冊而被忽略（瀏覽器主控台會看到 "unregistered ComponentInstance" 警告），
+// 導致畫面容器維持在很小的高度、內容看起來像消失了。改成載入後短時間內重複補送幾次，
+// 就算第一次被漏接，後面幾次也會補上。
+function scheduleHeightRetries(getHeight) {
+  [50, 150, 400, 800, 1500].forEach(delay => {
+    setTimeout(() => setFrameHeight(getHeight()), delay);
+  });
+}
+
 let rows = [];
 let palette = [];
 let nonceCounter = 0;
+const stage = document.getElementById("stage");
 const tbody = document.getElementById("tbody");
 
 function escapeHtml(s) {
@@ -127,43 +146,51 @@ function closeAllSwatchPopups() {
   document.querySelectorAll(".swatch-popup.open").forEach(p => p.classList.remove("open"));
 }
 
-function buildSwatchCell(row) {
-  const wrap = document.createElement("div");
-  wrap.className = "swatch-wrap";
-
-  const btn = document.createElement("div");
-  btn.className = "swatch-btn";
-  btn.style.background = row.color;
-  wrap.appendChild(btn);
-
-  const popup = document.createElement("div");
-  popup.className = "swatch-popup";
-  palette.forEach(color => {
-    const opt = document.createElement("div");
-    opt.className = "swatch-option" + (color === row.color ? " selected" : "");
-    opt.style.background = color;
-    opt.addEventListener("click", (e) => {
-      e.stopPropagation();
+// 事件代理：監聽器只在 #stage 上綁一次，不管 tbody 重繪幾次都不會漏接點擊
+// （原本是每次 render() 都對新產生的 DOM 元素重新綁 addEventListener，
+//  如果使用者剛好在重繪的瞬間點擊，那個當下新元素還沒綁好事件，點擊就會落空）
+stage.addEventListener("click", (e) => {
+  const option = e.target.closest(".swatch-option");
+  if (option) {
+    e.stopPropagation();
+    const roomId = Number(option.dataset.roomId);
+    const color = option.dataset.color;
+    const row = rows.find(r => r.roomId === roomId);
+    if (row) {
       row.color = color;
       closeAllSwatchPopups();
       render();
       send();
-    });
-    popup.appendChild(opt);
-  });
-  wrap.appendChild(popup);
+    }
+    return;
+  }
 
-  btn.addEventListener("click", (e) => {
+  const btn = e.target.closest(".swatch-btn");
+  if (btn) {
     e.stopPropagation();
-    const wasOpen = popup.classList.contains("open");
+    const roomId = Number(btn.dataset.roomId);
+    const popup = tbody.querySelector(`.swatch-popup[data-room-id="${roomId}"]`);
+    const wasOpen = popup && popup.classList.contains("open");
     closeAllSwatchPopups();
-    if (!wasOpen) popup.classList.add("open");
-  });
-
-  return wrap;
-}
+    if (popup && !wasOpen) popup.classList.add("open");
+  }
+});
 
 document.addEventListener("click", () => closeAllSwatchPopups());
+
+function buildSwatchCellHtml(row) {
+  const options = palette.map(color => `
+    <div class="swatch-option${color === row.color ? " selected" : ""}"
+         data-room-id="${row.roomId}" data-color="${color}"
+         style="background:${color}"></div>
+  `).join("");
+  return `
+    <div class="swatch-wrap">
+      <div class="swatch-btn" data-room-id="${row.roomId}" style="background:${row.color}"></div>
+      <div class="swatch-popup" data-room-id="${row.roomId}">${options}</div>
+    </div>
+  `;
+}
 
 function render() {
   tbody.innerHTML = "";
@@ -187,7 +214,7 @@ function render() {
       tr.appendChild(tdId);
 
       const tdColor = document.createElement("td");
-      tdColor.appendChild(buildSwatchCell(r));
+      tdColor.innerHTML = buildSwatchCellHtml(r);
       tr.appendChild(tdColor);
 
       const tdName = document.createElement("td");
@@ -294,6 +321,7 @@ function render() {
   }
 
   setFrameHeight(Math.min(640, Math.max(200, document.body.scrollHeight + 20)));
+  scheduleHeightRetries(() => Math.min(640, Math.max(200, document.body.scrollHeight + 20)));
 }
 
 window.addEventListener("message", (event) => {
@@ -324,6 +352,7 @@ window.addEventListener("message", (event) => {
 
 componentReady();
 setFrameHeight(500);
+scheduleHeightRetries(() => 500);
 </script>
 </body>
 </html>
