@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+:root {
+  --blue: #2563eb;
+  --blue-pale: #eff6ff;
+  --border: #e5e7eb;
+  --text: #172033;
+  --muted: #6b7280;
+  --bg: #f5f7fb;
+}
+html,body{margin:0;padding:0;font-family:Arial,"Microsoft JhengHei",sans-serif;background:#fff;color:var(--text)}
+.hint{font-size:12px;color:var(--muted);padding:2px 2px 10px 2px;line-height:1.6}
+
+#stage{ overflow:auto; border:1px solid var(--border); border-radius:10px; max-height:640px; }
+
+table{ border-collapse:collapse; font-size:12.5px; width:max-content; min-width:100%; }
+th{
+  position:sticky; top:0; background:#f9fafb; text-align:left; padding:8px 10px;
+  border-bottom:1px solid var(--border); font-size:11.5px; color:var(--muted);
+  white-space:nowrap; z-index:2;
+}
+td{ padding:6px 8px; border-bottom:1px solid #f1f3f5; vertical-align:middle; white-space:nowrap; }
+
+.readonly-cell{ color:#4b5563; }
+.num-cell{ text-align:right; }
+
+input[type=text], input[type=number]{
+  width:100%; box-sizing:border-box; font-size:12.5px; padding:5px 7px;
+  border:1px solid #dbe0e6; border-radius:6px; color:var(--text); outline:none;
+}
+input[type=text]:focus, input[type=number]:focus{ border-color:var(--blue); }
+input.name-input{ min-width:110px; }
+input.model-input{ min-width:130px; }
+input.num-input{ width:70px; text-align:right; }
+
+.swatch-wrap{ position:relative; display:inline-block; }
+.swatch-btn{
+  width:26px; height:26px; border-radius:7px; border:2px solid #fff;
+  box-shadow:0 0 0 1px var(--border); cursor:pointer;
+}
+.swatch-popup{
+  display:none; position:absolute; top:32px; left:0; z-index:20;
+  background:#fff; border:1px solid var(--border); border-radius:10px;
+  padding:8px; box-shadow:0 6px 18px rgba(0,0,0,0.12);
+  grid-template-columns:repeat(3, 24px); gap:6px;
+}
+.swatch-popup.open{ display:grid; }
+.swatch-option{
+  width:24px; height:24px; border-radius:6px; cursor:pointer; border:2px solid transparent;
+}
+.swatch-option.selected{ border-color:var(--text); }
+
+.merge-cell{
+  text-align:center; background:#fafcff; border-left:1px solid var(--border);
+}
+.merge-cell .model{ font-weight:700; }
+.merge-cell .rate{ font-size:11.5px; color:var(--muted); margin-top:2px; }
+.merge-cell .rate.warn{ color:#b45309; }
+.merge-cell .empty{ color:#c7ccd1; font-size:11.5px; }
+</style>
+</head>
+<body>
+
+<div class="hint">顏色欄可直接選色，跟圖面／房間列表同步；室外機型號／連結率是合併儲存格，由「室外機配對」確認後的結果決定，這裡唯讀。</div>
+<div id="stage">
+  <table>
+    <thead>
+      <tr>
+        <th>編號</th>
+        <th>顏色</th>
+        <th>區域名稱</th>
+        <th>面積(m²)</th>
+        <th>面積(坪)</th>
+        <th>每坪建議負荷(kcal/h/坪)</th>
+        <th>總熱負荷(kW)</th>
+        <th>室內機型號</th>
+        <th>數量</th>
+        <th>室內機冷房能力(kW)</th>
+        <th>平均負荷(kW/坪)</th>
+        <th>室外機型號／連結率</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<script>
+const RENDER_EVENT = "streamlit:render";
+
+function postToStreamlit(type, payload = {}) {
+  window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, "*");
+}
+function componentReady() { postToStreamlit("streamlit:componentReady", { apiVersion: 1 }); }
+function setComponentValue(value) { postToStreamlit("streamlit:setComponentValue", { value }); }
+function setFrameHeight(height = 500) { postToStreamlit("streamlit:setFrameHeight", { height }); }
+
+let rows = [];
+let palette = [];
+let nonceCounter = 0;
+const tbody = document.getElementById("tbody");
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
+}
+
+function send() {
+  nonceCounter += 1;
+  const updates = rows.map(r => ({
+    room_id: r.roomId,
+    name: r.name,
+    color: r.color,
+    per_ping_load: r.perPingLoad,
+    indoor_model: r.indoorModel,
+    indoor_quantity: r.indoorQuantity,
+    indoor_capacity_kw: r.indoorCapacityKw,
+  }));
+  setComponentValue({ updates, nonce: nonceCounter });
+}
+
+function closeAllSwatchPopups() {
+  document.querySelectorAll(".swatch-popup.open").forEach(p => p.classList.remove("open"));
+}
+
+function buildSwatchCell(row) {
+  const wrap = document.createElement("div");
+  wrap.className = "swatch-wrap";
+
+  const btn = document.createElement("div");
+  btn.className = "swatch-btn";
+  btn.style.background = row.color;
+  wrap.appendChild(btn);
+
+  const popup = document.createElement("div");
+  popup.className = "swatch-popup";
+  palette.forEach(color => {
+    const opt = document.createElement("div");
+    opt.className = "swatch-option" + (color === row.color ? " selected" : "");
+    opt.style.background = color;
+    opt.addEventListener("click", (e) => {
+      e.stopPropagation();
+      row.color = color;
+      closeAllSwatchPopups();
+      render();
+      send();
+    });
+    popup.appendChild(opt);
+  });
+  wrap.appendChild(popup);
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wasOpen = popup.classList.contains("open");
+    closeAllSwatchPopups();
+    if (!wasOpen) popup.classList.add("open");
+  });
+
+  return wrap;
+}
+
+document.addEventListener("click", () => closeAllSwatchPopups());
+
+function render() {
+  tbody.innerHTML = "";
+
+  // 找出合併儲存格的分組範圍：merge_group 連續相同就合併
+  let i = 0;
+  while (i < rows.length) {
+    let j = i;
+    while (j + 1 < rows.length && rows[j + 1].mergeGroup === rows[i].mergeGroup) {
+      j += 1;
+    }
+    const spanCount = j - i + 1;
+
+    for (let k = i; k <= j; k++) {
+      const r = rows[k];
+      const tr = document.createElement("tr");
+
+      const tdId = document.createElement("td");
+      tdId.className = "readonly-cell num-cell";
+      tdId.textContent = r.roomId;
+      tr.appendChild(tdId);
+
+      const tdColor = document.createElement("td");
+      tdColor.appendChild(buildSwatchCell(r));
+      tr.appendChild(tdColor);
+
+      const tdName = document.createElement("td");
+      const nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "name-input";
+      nameInput.value = r.name;
+      nameInput.addEventListener("input", e => { r.name = e.target.value; });
+      nameInput.addEventListener("change", send);
+      tdName.appendChild(nameInput);
+      tr.appendChild(tdName);
+
+      const tdArea1 = document.createElement("td");
+      tdArea1.className = "readonly-cell num-cell";
+      tdArea1.textContent = r.areaM2.toFixed(2);
+      tr.appendChild(tdArea1);
+
+      const tdArea2 = document.createElement("td");
+      tdArea2.className = "readonly-cell num-cell";
+      tdArea2.textContent = r.areaPing.toFixed(2);
+      tr.appendChild(tdArea2);
+
+      const tdLoad = document.createElement("td");
+      const loadInput = document.createElement("input");
+      loadInput.type = "number";
+      loadInput.className = "num-input";
+      loadInput.step = "10";
+      loadInput.value = r.perPingLoad;
+      loadInput.addEventListener("input", e => { r.perPingLoad = parseFloat(e.target.value) || 0; });
+      loadInput.addEventListener("change", send);
+      tdLoad.appendChild(loadInput);
+      tr.appendChild(tdLoad);
+
+      const tdHeat = document.createElement("td");
+      tdHeat.className = "readonly-cell num-cell";
+      tdHeat.textContent = r.totalHeatKw.toFixed(2);
+      tr.appendChild(tdHeat);
+
+      const tdIndoorModel = document.createElement("td");
+      const modelInput = document.createElement("input");
+      modelInput.type = "text";
+      modelInput.className = "model-input";
+      modelInput.value = r.indoorModel;
+      modelInput.addEventListener("input", e => { r.indoorModel = e.target.value; });
+      modelInput.addEventListener("change", send);
+      tdIndoorModel.appendChild(modelInput);
+      tr.appendChild(tdIndoorModel);
+
+      const tdQty = document.createElement("td");
+      const qtyInput = document.createElement("input");
+      qtyInput.type = "number";
+      qtyInput.className = "num-input";
+      qtyInput.min = "1";
+      qtyInput.step = "1";
+      qtyInput.value = r.indoorQuantity;
+      qtyInput.addEventListener("input", e => { r.indoorQuantity = parseInt(e.target.value) || 1; });
+      qtyInput.addEventListener("change", send);
+      tdQty.appendChild(qtyInput);
+      tr.appendChild(tdQty);
+
+      const tdCap = document.createElement("td");
+      const capInput = document.createElement("input");
+      capInput.type = "number";
+      capInput.className = "num-input";
+      capInput.step = "0.1";
+      capInput.value = (r.indoorCapacityKw === null || r.indoorCapacityKw === undefined) ? "" : r.indoorCapacityKw;
+      capInput.placeholder = "-";
+      capInput.addEventListener("input", e => {
+        r.indoorCapacityKw = e.target.value === "" ? null : (parseFloat(e.target.value) || 0);
+      });
+      capInput.addEventListener("change", send);
+      tdCap.appendChild(capInput);
+      tr.appendChild(tdCap);
+
+      const tdAvg = document.createElement("td");
+      tdAvg.className = "readonly-cell num-cell";
+      tdAvg.textContent = (r.averageLoad === null || r.averageLoad === undefined) ? "-" : r.averageLoad.toFixed(2);
+      tr.appendChild(tdAvg);
+
+      if (k === i) {
+        const tdMerge = document.createElement("td");
+        tdMerge.className = "merge-cell";
+        tdMerge.rowSpan = spanCount;
+        if (r.outdoorModel) {
+          const rateText = (r.connectionRate === null || r.connectionRate === undefined)
+            ? ""
+            : `連結率 ${r.connectionRate.toFixed(1)}%`;
+          const rateClass = (r.connectionRate !== null && r.connectionRate !== undefined
+            && (r.connectionRate < 100 || r.connectionRate > 130)) ? "rate warn" : "rate";
+          tdMerge.innerHTML = `
+            <div class="model">${escapeHtml(r.outdoorModel)}</div>
+            <div class="${rateClass}">${escapeHtml(rateText)}</div>
+          `;
+        } else {
+          tdMerge.innerHTML = `<div class="empty">尚未配對</div>`;
+        }
+        tr.appendChild(tdMerge);
+      }
+
+      tbody.appendChild(tr);
+    }
+
+    i = j + 1;
+  }
+
+  setFrameHeight(Math.min(640, Math.max(200, document.body.scrollHeight + 20)));
+}
+
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (!data || data.type !== RENDER_EVENT || !data.args) return;
+
+  const args = data.args;
+  palette = args.palette || [];
+  rows = (args.rows || []).map(r => ({
+    roomId: r.room_id,
+    name: r.name || "",
+    color: r.color,
+    areaM2: r.area_m2 || 0,
+    areaPing: r.area_ping || 0,
+    perPingLoad: r.per_ping_load || 0,
+    totalHeatKw: r.total_heat_kw || 0,
+    indoorModel: r.indoor_model || "",
+    indoorQuantity: r.indoor_quantity || 1,
+    indoorCapacityKw: (r.indoor_capacity_kw === undefined) ? null : r.indoor_capacity_kw,
+    averageLoad: (r.average_load === undefined) ? null : r.average_load,
+    outdoorModel: r.outdoor_model || "",
+    connectionRate: (r.connection_rate === undefined) ? null : r.connection_rate,
+    mergeGroup: r.merge_group,
+  }));
+
+  render();
+});
+
+componentReady();
+setFrameHeight(500);
+</script>
+</body>
+</html>

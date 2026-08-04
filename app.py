@@ -9,6 +9,7 @@ import streamlit as st
 from PIL import Image
 
 from floorplan_editor import floorplan_editor
+from hvac_table import hvac_table
 from equipment import (
     DEFAULT_EQUIPMENT_FILENAME,
     load_equipment,
@@ -610,6 +611,40 @@ if uploaded:
             room["outdoor_model"] = outdoor_model_col[i]
             room["connection_rate"] = connection_rate_col[i]
 
+    def _classify_family(indoor_model: str) -> str | None:
+        model_clean = indoor_model.strip().upper()
+        if not model_clean:
+            return None
+        for u in indoor_units:
+            if u["model"].strip().upper() == model_clean:
+                return "vrv"
+        for u in home_indoor_units:
+            if u["model"].strip().upper() == model_clean:
+                return "home"
+        for u in commercial_indoor_units:
+            if u["model"].strip().upper() == model_clean:
+                return "commercial"
+        return None
+
+    row_families = {
+        str(r["編號"]): _classify_family(str(r["室內機型號"]))
+        for _, r in df.iterrows()
+    }
+
+    # 合併儲存格的分組：家用/商用一對一每一列自己一組（永遠不跟別列合併）；
+    # VRV 則是連續且顏色相同的列合併成一組。
+    merge_group_ids: list[int] = []
+    _current_gid = 0
+    _prev_key = object()  # 保證第一列一定會開新的一組
+    for _, r in df.iterrows():
+        family = row_families.get(str(r["編號"]))
+        is_oneone = family in ("home", "commercial")
+        key = (str(r["編號"]), True) if is_oneone else (r["顏色"], False)
+        if key != _prev_key:
+            _current_gid += 1
+        merge_group_ids.append(_current_gid)
+        _prev_key = key
+
     if total_rooms:
         st.markdown('<div class="section-label">室外機配對</div>', unsafe_allow_html=True)
         st.caption(
@@ -620,29 +655,10 @@ if uploaded:
             "改顏色本身不會自動觸發配對。"
         )
         if st.button("✅ 確認：配對室外機", key="confirm_outdoor_match_btn"):
-
-            def _classify_family(indoor_model: str) -> str | None:
-                model_clean = indoor_model.strip().upper()
-                if not model_clean:
-                    return None
-                for u in indoor_units:
-                    if u["model"].strip().upper() == model_clean:
-                        return "vrv"
-                for u in home_indoor_units:
-                    if u["model"].strip().upper() == model_clean:
-                        return "home"
-                for u in commercial_indoor_units:
-                    if u["model"].strip().upper() == model_clean:
-                        return "commercial"
-                return None
-
             new_vrv_results = {}
             new_oneone_results = {}
 
-            # 先把每一列依室內機型號分類成 vrv / home / commercial / 不明
-            row_families = {}
-            for _, r in df.iterrows():
-                row_families[str(r["編號"])] = _classify_family(str(r["室內機型號"]))
+            # row_families 已經在上面算過了，這裡直接沿用（依室內機型號分類成 vrv / home / commercial / 不明）
 
             # VRV：按顏色分組（只算被分類成 vrv 的那些列），沿用連結率邏輯
             if outdoor_units:
@@ -789,155 +805,78 @@ if uploaded:
             "室內外機資料與連結率；面積與總熱負荷由系統自動計算。"
         )
 
-    edited_df = st.data_editor(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        disabled=[
-            "編號",
-            "面積 (m²)",
-            "面積 (坪)",
-            "總熱負荷 (kW)",
-            "平均負荷 (kW/坪)",
-            "室外機型號",
-            "連結率 (%)",
-        ],
-        column_config={
-            "編號": st.column_config.NumberColumn(
-                "編號",
-                disabled=True,
-                format="%d",
-                width="small",
+    rows_payload = []
+    for i, (_, row) in enumerate(df.iterrows()):
+        rows_payload.append({
+            "room_id": int(row["編號"]),
+            "name": str(row["區域名稱"]),
+            "color": str(row["顏色"]),
+            "area_m2": float(row["面積 (m²)"]),
+            "area_ping": float(row["面積 (坪)"]),
+            "per_ping_load": float(row["每坪建議負荷值 (kcal/h/坪)"]),
+            "total_heat_kw": float(row["總熱負荷 (kW)"]),
+            "indoor_model": "" if pd.isna(row["室內機型號"]) else str(row["室內機型號"]),
+            "indoor_quantity": 1 if pd.isna(row["室內機數量"]) else int(row["室內機數量"]),
+            "indoor_capacity_kw": (
+                None if pd.isna(row["室內機冷房能力 (kW)"])
+                else float(row["室內機冷房能力 (kW)"])
             ),
-            "顏色": st.column_config.SelectboxColumn(
-                "顏色",
-                options=ROOM_COLOR_PALETTE,
-                required=True,
-                width="small",
-                help="跟圖面／房間列表的顏色同步；相同顏色＝同一台室外機（按「確認」才會配對）",
+            "average_load": (
+                None if pd.isna(row["平均負荷 (kW/坪)"])
+                else float(row["平均負荷 (kW/坪)"])
             ),
-            "區域名稱": st.column_config.TextColumn(
-                "區域名稱",
-                required=True,
-                width="medium",
+            "outdoor_model": "" if pd.isna(row["室外機型號"]) else str(row["室外機型號"]),
+            "connection_rate": (
+                None if pd.isna(row["連結率 (%)"])
+                else float(row["連結率 (%)"])
             ),
-            "面積 (m²)": st.column_config.NumberColumn(
-                "面積 (m²)",
-                disabled=True,
-                format="%.2f",
-                width="small",
-            ),
-            "面積 (坪)": st.column_config.NumberColumn(
-                "面積 (坪)",
-                disabled=True,
-                format="%.2f",
-                width="small",
-            ),
-            "每坪建議負荷值 (kcal/h/坪)": (
-                st.column_config.NumberColumn(
-                    "每坪建議負荷值 (kcal/h/坪)",
-                    min_value=0.0,
-                    step=50.0,
-                    format="%.0f",
-                    required=True,
-                    width="medium",
-                )
-            ),
-            "總熱負荷 (kW)": st.column_config.NumberColumn(
-                "總熱負荷 (kW)",
-                disabled=True,
-                format="%.2f",
-                width="small",
-            ),
-            "室內機數量": st.column_config.NumberColumn(
-                "室內機數量",
-                min_value=1,
-                step=1,
-                format="%d",
-                width="small",
-            ),
-            "平均負荷 (kW/坪)": st.column_config.NumberColumn(
-                "平均負荷 (kW/坪)",
-                disabled=True,
-                format="%.2f",
-                width="small",
-            ),
-            "室內機型號": st.column_config.TextColumn(
-                "室內機型號",
-                width="medium",
-            ),
-            "室內機冷房能力 (kW)": st.column_config.NumberColumn(
-                "室內機冷房能力 (kW)",
-                min_value=0.0,
-                step=0.1,
-                format="%.2f",
-                width="medium",
-            ),
-            "室外機型號": st.column_config.TextColumn(
-                "室外機型號",
-                disabled=True,
-                width="medium",
-                help="由上方「室外機分組」決定，不在這裡直接編輯",
-            ),
-            "連結率 (%)": st.column_config.NumberColumn(
-                "連結率 (%)",
-                disabled=True,
-                format="%.1f",
-                width="small",
-                help="由上方「室外機分組」決定，不在這裡直接編輯",
-            ),
-        },
-        key="hvac_result_editor",
+            "merge_group": merge_group_ids[i],
+        })
+
+    table_value = hvac_table(
+        rows=rows_payload,
+        palette=ROOM_COLOR_PALETTE,
+        revision=st.session_state.get("hvac_table_revision", 0),
+        key="hvac_table_main",
     )
 
-    def clean_optional_number(value):
-        if pd.isna(value) or value in ("", "-"):
-            return None
-        return float(value)
+    if isinstance(table_value, dict) and table_value.get("updates"):
+        nonce = table_value.get("nonce")
+        if nonce is not None and nonce != st.session_state.get("last_hvac_table_nonce"):
+            st.session_state["last_hvac_table_nonce"] = nonce
 
-    room_by_id = {
-        str(room.get("id")): room
-        for room in st.session_state.get("rooms", edited_rooms)
-    }
-    changed = False
+            room_by_id = {
+                str(room.get("id")): room
+                for room in st.session_state.get("rooms", edited_rooms)
+            }
+            changed = False
 
-    for _, row in edited_df.iterrows():
-        room = room_by_id.get(str(row["編號"]))
-        if room is None:
-            continue
+            for upd in table_value["updates"]:
+                room = room_by_id.get(str(upd.get("room_id")))
+                if room is None:
+                    continue
 
-        updates = {
-            "name": str(row["區域名稱"]).strip(),
-            "color": str(row["顏色"]).strip() or "#ef4444",
-            "per_ping_load": float(
-                row["每坪建議負荷值 (kcal/h/坪)"]
-            ),
-            "indoor_model": (
-                str(row["室內機型號"]).strip()
-                if not pd.isna(row["室內機型號"])
-                else ""
-            ),
-            "indoor_quantity": int(
-                row["室內機數量"]
-                if not pd.isna(row["室內機數量"])
-                else 1
-            ),
-            "indoor_capacity_kw": clean_optional_number(
-                row["室內機冷房能力 (kW)"]
-            ),
-        }
+                updates = {
+                    "name": str(upd.get("name", "")).strip(),
+                    "color": str(upd.get("color") or "#ef4444"),
+                    "per_ping_load": float(upd.get("per_ping_load") or 0),
+                    "indoor_model": str(upd.get("indoor_model", "")).strip(),
+                    "indoor_quantity": int(upd.get("indoor_quantity") or 1),
+                    "indoor_capacity_kw": (
+                        float(upd["indoor_capacity_kw"])
+                        if upd.get("indoor_capacity_kw") is not None
+                        else None
+                    ),
+                }
 
-        for field, value in updates.items():
-            if room.get(field) != value:
-                room[field] = value
-                changed = True
+                for field, value in updates.items():
+                    if room.get(field) != value:
+                        room[field] = value
+                        changed = True
 
-    if changed:
-        st.session_state["rooms"] = list(room_by_id.values())
-        if "hvac_result_editor" in st.session_state:
-            del st.session_state["hvac_result_editor"]
-        st.rerun()
+            if changed:
+                st.session_state["rooms"] = list(room_by_id.values())
+                st.rerun()
 
     m1, m2, m3 = st.columns(3)
     m1.metric("總面積", f"{total_area_m2:.2f} m²")
