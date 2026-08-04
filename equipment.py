@@ -48,14 +48,23 @@ def _find_header_row(df: pd.DataFrame) -> int | None:
     return None
 
 
-def load_vrv_equipment(
+def load_equipment(
     excel_path: str | Path,
-) -> tuple[list[dict], list[dict]]:
+) -> dict[str, list[dict]]:
     """讀取固定放在 GitHub 根目錄的大金設備報價單。
 
     已確認欄位：
     A 類別、B 類型、C 型號、G 冷氣能力 kW、
-    I/J/K 連結機型1/2/3。
+    I/J/K 連結機型1/2/3、O 連接指數（VRV 算連結率用，取代舊版用型號數字用猜的）。
+
+    A 欄類別支援：
+    - VRV室外機 / VRV內機 / VRV室內機
+    - 家用一對一室內機 / 家用一對一室外機
+    - 商用一對一室內機 / 商用一對一室外機
+
+    回傳 dict，key 固定為：
+    vrv_indoor, vrv_outdoor, home_indoor, home_outdoor,
+    commercial_indoor, commercial_outdoor
     """
     path = Path(excel_path)
 
@@ -66,8 +75,14 @@ def load_vrv_equipment(
         )
 
     workbook = pd.ExcelFile(path)
-    indoor_units: list[dict] = []
-    outdoor_units: list[dict] = []
+    buckets: dict[str, list[dict]] = {
+        "vrv_indoor": [],
+        "vrv_outdoor": [],
+        "home_indoor": [],
+        "home_outdoor": [],
+        "commercial_indoor": [],
+        "commercial_outdoor": [],
+    }
 
     for sheet_name in workbook.sheet_names:
         raw = pd.read_excel(
@@ -107,12 +122,17 @@ def load_vrv_equipment(
                 if value:
                     connection_models.append(value)
 
+            connection_index = _to_number(
+                row.iloc[14] if len(row) > 14 else None
+            )
+
             item = {
                 "category": category,
                 "type": equipment_type,
                 "model": model,
                 "capacity_kw": float(capacity_kw),
                 "connection_models": connection_models,
+                "connection_index": connection_index,
                 "sheet": sheet_name,
                 "excel_row": row_index + 1,
             }
@@ -120,12 +140,17 @@ def load_vrv_equipment(
             normalized = category.replace(" ", "")
 
             if "VRV室外機" in normalized:
-                outdoor_units.append(item)
-            elif (
-                "VRV內機" in normalized
-                or "VRV室內機" in normalized
-            ):
-                indoor_units.append(item)
+                buckets["vrv_outdoor"].append(item)
+            elif "VRV內機" in normalized or "VRV室內機" in normalized:
+                buckets["vrv_indoor"].append(item)
+            elif "家用一對一室外機" in normalized:
+                buckets["home_outdoor"].append(item)
+            elif "家用一對一室內機" in normalized:
+                buckets["home_indoor"].append(item)
+            elif "商用一對一室外機" in normalized:
+                buckets["commercial_outdoor"].append(item)
+            elif "商用一對一室內機" in normalized:
+                buckets["commercial_indoor"].append(item)
 
     def deduplicate(items: list[dict]) -> list[dict]:
         by_model: dict[str, dict] = {}
@@ -148,7 +173,38 @@ def load_vrv_equipment(
             ),
         )
 
-    return deduplicate(indoor_units), deduplicate(outdoor_units)
+    return {key: deduplicate(items) for key, items in buckets.items()}
+
+
+def find_closest_outdoor_1to1(
+    indoor_model: str,
+    outdoor_family: list[dict],
+) -> dict:
+    """家用一對一／商用一對一用：室外機＝同一個家族（家用配家用、商用配商用）裡，
+    型號數字（從型號文字抽出來的，跟舊版 model_number() 邏輯一樣）最接近室內機的那一台。
+    不是 VRV 那種連結率算法，純粹一對一配對。"""
+    indoor_number = model_number(indoor_model)
+    if indoor_number is None or not outdoor_family:
+        return {"model": "", "capacity_kw": None}
+
+    best_unit = None
+    best_diff = None
+    for unit in outdoor_family:
+        unit_number = model_number(unit["model"])
+        if unit_number is None:
+            continue
+        diff = abs(unit_number - indoor_number)
+        if (
+            best_diff is None
+            or diff < best_diff
+            or (diff == best_diff and unit["capacity_kw"] < best_unit["capacity_kw"])
+        ):
+            best_unit = unit
+            best_diff = diff
+
+    if best_unit is None:
+        return {"model": "", "capacity_kw": None}
+    return {"model": best_unit["model"], "capacity_kw": best_unit["capacity_kw"]}
 
 
 def recommend_indoor(
@@ -185,6 +241,8 @@ def recommend_indoor(
 
 
 def model_number(model: str) -> float | None:
+    """備援用：Excel O 欄（連接指數）缺值時，退回用型號文字猜一個數字。
+    正常情況下不會走到這裡——有 O 欄資料一律優先用 O 欄的實際數值。"""
     text = _clean_text(model).upper()
 
     preferred = re.search(
@@ -199,40 +257,71 @@ def model_number(model: str) -> float | None:
     return float(numbers[-1]) if numbers else None
 
 
+# 小型 VRV 室外機：連結率算法跟一般 VRV 不一樣（不除以 25，直接用能力指數比），
+# 型號比對時忽略大小寫與前後空白。
+SMALL_VRV_OUTDOOR_MODELS = {
+    "RXYCQ4AVET", "RXYCQ5AVET", "RXYCQ6AVET",
+    "RXYMQ8TTLT", "RXYMQ10TTLT",
+    "RXYMQ6TVET", "RXYMQ8TVET", "RXYMQ10TVET",
+}
+
+
+def _is_small_vrv(model: str) -> bool:
+    return _clean_text(model).upper().replace(" ", "") in SMALL_VRV_OUTDOOR_MODELS
+
+
+def _find_unit_by_model(model: str, units: list[dict]) -> dict | None:
+    target = _clean_text(model).upper()
+    for unit in units:
+        if _clean_text(unit.get("model", "")).upper() == target:
+            return unit
+    return None
+
+
+def _connection_index_for(model: str, units: list[dict]) -> float | None:
+    """優先讀 Excel O 欄（連接指數）的實際數值；找不到這個型號或 O 欄是空的，
+    才退回用型號文字猜一個數字（並不保證準確，只是避免整個計算掛掉）。"""
+    unit = _find_unit_by_model(model, units)
+    if unit is not None and unit.get("connection_index") is not None:
+        return float(unit["connection_index"])
+    return model_number(model)
+
+
 def calculate_connection_rate(
     indoor_rows: list[dict],
     outdoor_model: str,
+    indoor_units: list[dict],
+    outdoor_units: list[dict],
 ) -> float | None:
-    outdoor_number = model_number(outdoor_model)
-    if not outdoor_number or outdoor_number <= 0:
+    outdoor_index = _connection_index_for(outdoor_model, outdoor_units)
+    if not outdoor_index or outdoor_index <= 0:
         return None
 
     total_indoor_index = 0.0
     for row in indoor_rows:
-        indoor_number = model_number(
-            row.get("indoor_model", "")
+        indoor_index = _connection_index_for(
+            row.get("indoor_model", ""), indoor_units
         )
         quantity = row.get("indoor_quantity", 1) or 1
 
-        if indoor_number:
-            total_indoor_index += (
-                indoor_number * float(quantity)
-            )
+        if indoor_index:
+            total_indoor_index += indoor_index * float(quantity)
 
     if total_indoor_index <= 0:
         return None
 
-    return (
-        total_indoor_index
-        / 25.0
-        / outdoor_number
-        * 100.0
-    )
+    if _is_small_vrv(outdoor_model):
+        # 小型 VRV：連結率% = 室內機能力指數加總 / 室外機能力指數（不除以25）
+        return total_indoor_index / outdoor_index * 100.0
+
+    # 一般 VRV：連結率% = 室內機能力指數加總 / 25 / 室外機數字
+    return total_indoor_index / 25.0 / outdoor_index * 100.0
 
 
 def recommend_outdoor(
     indoor_rows: list[dict],
     outdoor_units: list[dict],
+    indoor_units: list[dict],
     min_rate: float = 105.0,
     max_rate: float = 110.0,
 ) -> dict:
@@ -243,6 +332,8 @@ def recommend_outdoor(
         rate = calculate_connection_rate(
             indoor_rows,
             unit["model"],
+            indoor_units,
+            outdoor_units,
         )
         if rate is None:
             continue
