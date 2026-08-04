@@ -9,7 +9,6 @@ import streamlit as st
 from PIL import Image
 
 from floorplan_editor import floorplan_editor
-from outdoor_grouping import outdoor_grouping
 from equipment import (
     DEFAULT_EQUIPMENT_FILENAME,
     load_vrv_equipment,
@@ -25,6 +24,17 @@ EQUIPMENT_FILE = (
     Path(__file__).resolve().parent
     / DEFAULT_EQUIPMENT_FILENAME
 )
+
+# 跟 frontend/index.html（floorplan_editor 改色按鈕）用的是同一組顏色，
+# 圖面／房間列表／下方選機表三邊都靠這組顏色互相對應，不要單獨修改其中一邊。
+ROOM_COLOR_PALETTE = [
+    "#ef4444",
+    "#f97316",
+    "#f59e0b",
+    "#22c55e",
+    "#3b82f6",
+    "#a855f7",
+]
 
 
 st.set_page_config(
@@ -259,7 +269,7 @@ def demo_rooms():
             "name": "區域4",
             "room_type": "辦公室",
             "confidence": 1.0,
-            "color": "#eab308",
+            "color": "#22c55e",
             "unit_load": 120,
             "per_ping_load": 650,
             "included": True,
@@ -429,8 +439,14 @@ if uploaded:
     )
     df = pd.DataFrame(rows)
 
+    if "顏色" in df.columns:
+        df["顏色"] = df["顏色"].apply(
+            lambda c: c if c in ROOM_COLOR_PALETTE else ROOM_COLOR_PALETTE[0]
+        )
+
     expected_columns = [
         "編號",
+        "顏色",
         "區域名稱",
         "面積 (m²)",
         "面積 (坪)",
@@ -457,6 +473,8 @@ if uploaded:
                 df[column] = 650.0
             elif column == "室內機數量":
                 df[column] = 1
+            elif column == "顏色":
+                df[column] = "#ef4444"
             else:
                 df[column] = ""
 
@@ -543,57 +561,25 @@ if uploaded:
         / pd.to_numeric(df["面積 (坪)"], errors="coerce").replace(0, pd.NA)
     ).round(2)
 
-    # 室外機分組：支援一層樓有一台或多台室外機，可用合併儲存格自由調整哪幾個房間
-    # 屬於同一組，連結率／推薦室外機型號依分組即時重算。
+    # 室外機配對：相同顏色的房間視為同一台室外機。顏色圖面／房間列表／下方選機表
+    # 三邊互相同步（顏色的唯一真實來源是 room["color"]，這裡只是讀出來顯示）；
+    # 室外機型號／連結率則是按下「確認」才會依目前的顏色分組重新配對，不會即時自動變動。
     total_rooms = len(df)
-    room_sig = tuple(str(v) for v in df["編號"].tolist()) if not df.empty else ()
 
-    if st.session_state.get("outdoor_group_room_sig") != room_sig:
-        st.session_state["outdoor_group_room_sig"] = room_sig
-        st.session_state["outdoor_group_starts"] = {0} if total_rooms else set()
-        st.session_state["outdoor_group_revision"] = (
-            st.session_state.get("outdoor_group_revision", 0) + 1
-        )
+    if "outdoor_match_results" not in st.session_state:
+        st.session_state["outdoor_match_results"] = {}  # {顏色hex: {"model":str, "rate":float|None}}
+    match_results = st.session_state["outdoor_match_results"]
 
-    group_starts = st.session_state.get("outdoor_group_starts", {0})
-
-    def _build_groups(starts_sorted, total):
-        groups = []
-        for i, start in enumerate(starts_sorted):
-            end = starts_sorted[i + 1] - 1 if i + 1 < len(starts_sorted) else total - 1
-            groups.append((start, end))
-        return groups
-
-    outdoor_model_col = [""] * total_rooms
-    connection_rate_col = [None] * total_rooms
-
-    if outdoor_units and total_rooms:
-        starts_sorted = sorted(group_starts)
-        for (start, end) in _build_groups(starts_sorted, total_rooms):
-            group_df = df.iloc[start:end + 1]
-            indoor_rows_for_outdoor = [
-                {
-                    "indoor_model": str(row["室內機型號"]),
-                    "indoor_quantity": int(row["室內機數量"] or 1),
-                }
-                for _, row in group_df.iterrows()
-                if str(row["室內機型號"]).strip()
-            ]
-            rec = recommend_outdoor(
-                indoor_rows_for_outdoor,
-                outdoor_units,
-                min_rate=105.0,
-                max_rate=110.0,
-            )
-            model = rec.get("model") or ""
-            rate = (
-                round(rec["connection_rate"], 1)
-                if rec.get("connection_rate") is not None
-                else None
-            )
-            for i in range(start, end + 1):
-                outdoor_model_col[i] = model
-                connection_rate_col[i] = rate
+    outdoor_model_col = []
+    connection_rate_col = []
+    for _, row in df.iterrows():
+        result = match_results.get(row["顏色"])
+        if result:
+            outdoor_model_col.append(result.get("model") or "")
+            connection_rate_col.append(result.get("rate"))
+        else:
+            outdoor_model_col.append("")
+            connection_rate_col.append(None)
 
     df["室外機型號"] = outdoor_model_col
     df["連結率 (%)"] = connection_rate_col
@@ -605,32 +591,41 @@ if uploaded:
             room["connection_rate"] = connection_rate_col[i]
 
     if total_rooms:
-        st.markdown('<div class="section-label">室外機分組</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">室外機配對</div>', unsafe_allow_html=True)
         st.caption(
-            "拖曳虛線把手調整哪幾個房間屬於同一台室外機；點房間名稱可新增分組；"
-            "點把手上方的 × 可合併。連結率會依分組即時重算。"
+            "圖面／房間列表／下方選機表的顏色互相同步（改任一邊都會連動其他兩邊）。"
+            "相同顏色的房間視為接同一台室外機；顏色調整好之後按下面的「確認」，"
+            "系統才會依目前的顏色分組重新配對室外機、計算連結率——改顏色本身不會自動觸發配對。"
         )
-        grouping_rows_payload = [
-            {
-                "index": i,
-                "label": str(df.iloc[i]["區域名稱"]),
-                "is_split": i in group_starts,
-                "outdoor_model": outdoor_model_col[i],
-                "connection_rate": connection_rate_col[i],
-            }
-            for i in range(total_rooms)
-        ]
-        grouping_value = outdoor_grouping(
-            rows=grouping_rows_payload,
-            revision=st.session_state.get("outdoor_group_revision", 0),
-            key="outdoor_grouping_main",
-        )
-        if isinstance(grouping_value, dict) and "splits" in grouping_value:
-            new_starts = {item["index"] for item in grouping_value["splits"]}
-            new_starts.add(0)
-            if new_starts != group_starts:
-                st.session_state["outdoor_group_starts"] = new_starts
-                st.rerun()
+        if st.button("✅ 確認：依顏色分組配對室外機", key="confirm_outdoor_match_btn"):
+            new_results = {}
+            if outdoor_units:
+                for color in df["顏色"].unique():
+                    group_df = df[df["顏色"] == color]
+                    indoor_rows_for_outdoor = [
+                        {
+                            "indoor_model": str(r["室內機型號"]),
+                            "indoor_quantity": int(r["室內機數量"] or 1),
+                        }
+                        for _, r in group_df.iterrows()
+                        if str(r["室內機型號"]).strip()
+                    ]
+                    rec = recommend_outdoor(
+                        indoor_rows_for_outdoor,
+                        outdoor_units,
+                        min_rate=105.0,
+                        max_rate=110.0,
+                    )
+                    new_results[color] = {
+                        "model": rec.get("model") or "",
+                        "rate": (
+                            round(rec["connection_rate"], 1)
+                            if rec.get("connection_rate") is not None
+                            else None
+                        ),
+                    }
+            st.session_state["outdoor_match_results"] = new_results
+            st.rerun()
 
     st.session_state["rooms"] = list(
         room_by_id_for_selection.values()
@@ -665,15 +660,6 @@ if uploaded:
         if df.empty:
             st.info("尚無房間資料")
         else:
-            palette = [
-                "#ec4899",
-                "#ef4444",
-                "#f59e0b",
-                "#eab308",
-                "#22c55e",
-                "#3b82f6",
-                "#8b5cf6",
-            ]
             with st.container(border=True):
                 for idx, row in df.iterrows():
                     item_col, text_col = st.columns([0.22, 1.5])
@@ -684,7 +670,7 @@ if uploaded:
                                 "border-radius:7px;color:white;"
                                 "display:flex;align-items:center;"
                                 "justify-content:center;font-weight:700;"
-                                f"background:{palette[idx % len(palette)]}'>"
+                                f"background:{row['顏色']}'>"
                                 f"{row['編號']}</div>"
                             ),
                             unsafe_allow_html=True,
@@ -743,6 +729,13 @@ if uploaded:
                 disabled=True,
                 format="%d",
                 width="small",
+            ),
+            "顏色": st.column_config.SelectboxColumn(
+                "顏色",
+                options=ROOM_COLOR_PALETTE,
+                required=True,
+                width="small",
+                help="跟圖面／房間列表的顏色同步；相同顏色＝同一台室外機（按「確認」才會配對）",
             ),
             "區域名稱": st.column_config.TextColumn(
                 "區域名稱",
@@ -836,6 +829,7 @@ if uploaded:
 
         updates = {
             "name": str(row["區域名稱"]).strip(),
+            "color": str(row["顏色"]).strip() or "#ef4444",
             "per_ping_load": float(
                 row["每坪建議負荷值 (kcal/h/坪)"]
             ),

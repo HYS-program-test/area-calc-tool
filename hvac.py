@@ -69,6 +69,7 @@ def calculate_rows(
         rows.append({
             "編號": room.get("id"),
             "區域名稱": room.get("name", ""),
+            "顏色": room.get("color") or "#ef4444",
             "面積 (m²)": round(area_m2, 2),
             "面積 (坪)": round(area_ping, 2),
             "每坪建議負荷值 (kcal/h/坪)": round(per_ping_load, 2),
