@@ -207,23 +207,31 @@ fg.addEventListener("mousedown", event => {
     return;
   }
 
-  // 先檢查是不是點到目前選取房間的角落控制點（拖曳調整大小/形狀用）
+  // 先找出這次點擊實際落在哪個房間「內部」（由上而下找最上層的那個）
+  let clickedIndex = -1;
+  for (let i = rooms.length - 1; i >= 0; i--) {
+    if (pointInPoly(p, rooms[i])) {
+      clickedIndex = i;
+      break;
+    }
+  }
+
+  // 只有「點到的角點屬於目前選取的房間」而且「這個點擊沒有明確落在別的房間內部」，
+  // 才當作拖曳角點調整大小；只要點擊落在別的房間裡面，一律優先切換選取，
+  // 不會被角點判斷搶走（這是之前顏色/刪除會作用到錯誤房間的根本原因）
   if (rooms[selected]) {
     const vertexIndex = findVertexAt(rooms[selected], p);
-    if (vertexIndex !== -1) {
+    if (vertexIndex !== -1 && (clickedIndex === -1 || clickedIndex === selected)) {
       dragTarget = { type: "vertex", vertexIndex };
       return;
     }
   }
 
-  // 沒點到控制點，才檢查是否點進某個房間本體（移動整個形狀）
-  for (let i = rooms.length - 1; i >= 0; i--) {
-    if (pointInPoly(p, rooms[i])) {
-      selected = i;
-      dragTarget = { type: "move", last: p };
-      draw();
-      return;
-    }
+  if (clickedIndex !== -1) {
+    selected = clickedIndex;
+    dragTarget = { type: "move", last: p };
+    draw();
+    return;
   }
 });
 
