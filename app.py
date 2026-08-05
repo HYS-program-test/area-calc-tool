@@ -426,14 +426,38 @@ if uploaded:
             key="floorplan_editor_main",
         )
 
+    def _merge_floorplan_rooms(current_rooms, editor_rooms):
+        """圖面編輯區實際上只會改「位置(points)」跟「顏色(color)」這兩個欄位；
+        它每次回傳的是整個房間物件（包含室內機型號、室外機配對結果等其他元件才管的
+        欄位），如果整包覆蓋回 session_state，會把選機表那邊剛更新的資料蓋掉
+        （這就是「選了家用一對多、按確認後又跳回VRV」的成因）。改成只同步
+        points/color 這兩個真的屬於圖面編輯區的欄位，其餘欄位保留 session_state
+        裡目前最新的值；新增/刪除的房間則整個採用圖面編輯區的版本。"""
+        current_by_id = {str(r.get("id")): r for r in current_rooms}
+        merged = []
+        for editor_room in editor_rooms:
+            rid = str(editor_room.get("id"))
+            current_room = current_by_id.get(rid)
+            if current_room is not None:
+                merged_room = dict(current_room)
+                merged_room["points"] = editor_room.get("points", current_room.get("points"))
+                merged_room["color"] = editor_room.get("color", current_room.get("color"))
+                merged.append(merged_room)
+            else:
+                merged.append(editor_room)
+        return merged
+
     if isinstance(editor_value, dict) and "rooms" in editor_value:
-        edited_rooms = editor_value["rooms"]
-        if edited_rooms != st.session_state.get("rooms"):
+        merged_rooms = _merge_floorplan_rooms(
+            st.session_state.get("rooms", rooms), editor_value["rooms"]
+        )
+        if merged_rooms != st.session_state.get("rooms"):
             # 元件真的回傳了新資料（不是上一輪殘留的舊回傳值）才更新＋重新整理，
             # 這樣下一輪會用「剛剛更新過的最新資料」當作元件的顯示內容，
             # 不會再發生「這一輪傳給元件的還是更新前的舊資料，把剛剛的變更蓋回去」的問題。
-            st.session_state["rooms"] = edited_rooms
+            st.session_state["rooms"] = merged_rooms
             st.rerun()
+        edited_rooms = merged_rooms
     else:
         edited_rooms = st.session_state.get("rooms", rooms)
 
