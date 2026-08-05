@@ -60,11 +60,12 @@ def load_equipment(
     A 欄類別支援：
     - VRV室外機 / VRV內機 / VRV室內機
     - 家用一對一室內機 / 家用一對一室外機
+    - 家用一對多室內機 / 家用一對多室外機
     - 商用一對一室內機 / 商用一對一室外機
 
     回傳 dict，key 固定為：
     vrv_indoor, vrv_outdoor, home_indoor, home_outdoor,
-    commercial_indoor, commercial_outdoor
+    home_multi_indoor, home_multi_outdoor, commercial_indoor, commercial_outdoor
     """
     path = Path(excel_path)
 
@@ -80,6 +81,8 @@ def load_equipment(
         "vrv_outdoor": [],
         "home_indoor": [],
         "home_outdoor": [],
+        "home_multi_indoor": [],
+        "home_multi_outdoor": [],
         "commercial_indoor": [],
         "commercial_outdoor": [],
     }
@@ -143,6 +146,10 @@ def load_equipment(
                 buckets["vrv_outdoor"].append(item)
             elif "VRV內機" in normalized or "VRV室內機" in normalized:
                 buckets["vrv_indoor"].append(item)
+            elif "家用一對多室外機" in normalized:
+                buckets["home_multi_outdoor"].append(item)
+            elif "家用一對多室內機" in normalized:
+                buckets["home_multi_indoor"].append(item)
             elif "家用一對一室外機" in normalized:
                 buckets["home_outdoor"].append(item)
             elif "家用一對一室內機" in normalized:
@@ -205,6 +212,37 @@ def find_closest_outdoor_1to1(
     if best_unit is None:
         return {"model": "", "capacity_kw": None}
     return {"model": best_unit["model"], "capacity_kw": best_unit["capacity_kw"]}
+
+
+def recommend_home_multi_outdoor(
+    indoor_rows: list[dict],
+    outdoor_units: list[dict],
+    indoor_units: list[dict],
+) -> dict:
+    """家用一對多用：這是「一台室外機接多台室內機」，邏輯上跟 VRV 一樣要按分組處理，
+    不是一對一。配對規則（根據原廠能力組合表）：室內機容量加總可以略大於室外機額定容量，
+    取加總後最接近、且不超過太多的那一台室外機——實際做法是找「額定容量 ≤ 室內機加總」
+    裡面最大的那一台；如果室內機加總比所有室外機都小，就退回容量最小的那一台頂著用。"""
+    total_indoor_kw = 0.0
+    for row in indoor_rows:
+        unit = _find_unit_by_model(row.get("indoor_model", ""), indoor_units)
+        quantity = row.get("indoor_quantity", 1) or 1
+        if unit:
+            total_indoor_kw += unit["capacity_kw"] * float(quantity)
+
+    if total_indoor_kw <= 0 or not outdoor_units:
+        return {"model": "", "capacity_kw": None, "total_indoor_kw": round(total_indoor_kw, 2)}
+
+    eligible = [u for u in outdoor_units if u["capacity_kw"] <= total_indoor_kw]
+    best_unit = max(eligible, key=lambda u: u["capacity_kw"]) if eligible else min(
+        outdoor_units, key=lambda u: u["capacity_kw"]
+    )
+
+    return {
+        "model": best_unit["model"],
+        "capacity_kw": best_unit["capacity_kw"],
+        "total_indoor_kw": round(total_indoor_kw, 2),
+    }
 
 
 def recommend_indoor(
