@@ -16,6 +16,7 @@ from equipment import (
     recommend_indoor,
     recommend_outdoor,
     find_closest_outdoor_1to1,
+    recommend_home_multi_outdoor,
 )
 from hvac import calculate_rows
 from openai_gateway import analyze_floorplan
@@ -503,6 +504,8 @@ if uploaded:
     outdoor_units = []
     home_indoor_units = []
     home_outdoor_units = []
+    home_multi_indoor_units = []
+    home_multi_outdoor_units = []
     commercial_indoor_units = []
     commercial_outdoor_units = []
 
@@ -512,11 +515,14 @@ if uploaded:
         outdoor_units = equipment["vrv_outdoor"]
         home_indoor_units = equipment["home_indoor"]
         home_outdoor_units = equipment["home_outdoor"]
+        home_multi_indoor_units = equipment["home_multi_indoor"]
+        home_multi_outdoor_units = equipment["home_multi_outdoor"]
         commercial_indoor_units = equipment["commercial_indoor"]
         commercial_outdoor_units = equipment["commercial_outdoor"]
         st.sidebar.success(
             f"設備表已載入：VRV 室內機 {len(indoor_units)} 筆、室外機 {len(outdoor_units)} 筆；"
             f"家用一對一 室內機 {len(home_indoor_units)} 筆、室外機 {len(home_outdoor_units)} 筆；"
+            f"家用一對多 室內機 {len(home_multi_indoor_units)} 筆、室外機 {len(home_multi_outdoor_units)} 筆；"
             f"商用一對一 室內機 {len(commercial_indoor_units)} 筆、室外機 {len(commercial_outdoor_units)} 筆"
         )
     except FileNotFoundError:
@@ -578,15 +584,21 @@ if uploaded:
     # 室外機配對：VRV 維持「相同顏色視為同一台室外機」＋連結率算法；
     # 家用一對一／商用一對一則是每間房間各自獨立配對（跟顏色分組無關，配對時也只會
     # 在同一個家族裡找——家用只配家用室外機、商用只配商用室外機，不會互相搭配）。
+    # 家用一對多是「一台室外機接多台室內機」，邏輯上比較像 VRV，一樣按顏色分組配對
+    # （室內機容量加總、找額定容量最接近的室外機，細節在 equipment.py 的
+    # recommend_home_multi_outdoor）。
     # 顏色圖面／房間列表／下方選機表三邊互相同步（顏色的唯一真實來源是 room["color"]，
     # 這裡只是讀出來顯示）；室外機型號／連結率則是按下「確認」才會重新配對，不會即時自動變動。
     total_rooms = len(df)
 
     if "outdoor_match_results" not in st.session_state:
         st.session_state["outdoor_match_results"] = {}  # VRV：{顏色hex: {"model":str, "rate":float|None}}
+    if "home_multi_match_results" not in st.session_state:
+        st.session_state["home_multi_match_results"] = {}  # 家用一對多：{顏色hex: {"model":str}}
     if "oneone_match_results" not in st.session_state:
-        st.session_state["oneone_match_results"] = {}  # 一對一：{編號str: {"model":str}}
+        st.session_state["oneone_match_results"] = {}  # 一對一：{編號str: {"model":str, "family":str}}
     match_results = st.session_state["outdoor_match_results"]
+    home_multi_results = st.session_state["home_multi_match_results"]
     oneone_results = st.session_state["oneone_match_results"]
 
     outdoor_model_col = []
@@ -601,9 +613,14 @@ if uploaded:
         if vrv_result:
             outdoor_model_col.append(vrv_result.get("model") or "")
             connection_rate_col.append(vrv_result.get("rate"))
-        else:
-            outdoor_model_col.append("")
-            connection_rate_col.append(None)
+            continue
+        hm_result = home_multi_results.get(row["顏色"])
+        if hm_result:
+            outdoor_model_col.append(hm_result.get("model") or "")
+            connection_rate_col.append(None)  # 家用一對多沒有連結率這個概念
+            continue
+        outdoor_model_col.append("")
+        connection_rate_col.append(None)
 
     df["室外機型號"] = outdoor_model_col
     df["連結率 (%)"] = connection_rate_col
@@ -624,6 +641,9 @@ if uploaded:
         for u in home_indoor_units:
             if u["model"].strip().upper() == model_clean:
                 return "home"
+        for u in home_multi_indoor_units:
+            if u["model"].strip().upper() == model_clean:
+                return "home_multi"
         for u in commercial_indoor_units:
             if u["model"].strip().upper() == model_clean:
                 return "commercial"
@@ -652,16 +672,17 @@ if uploaded:
         st.markdown('<div class="section-label">室外機配對</div>', unsafe_allow_html=True)
         st.caption(
             "圖面／房間列表／下方選機表的顏色互相同步（改任一邊都會連動其他兩邊）。"
-            "VRV：相同顏色的房間視為接同一台室外機，依分組算連結率。"
-            "家用一對一／商用一對一：每間房間各自配對自己的室外機，跟顏色分組無關，"
-            "也不會跨家用／商用互相搭配。顏色調整好之後按下面的「確認」，系統才會重新配對——"
-            "改顏色本身不會自動觸發配對。"
+            "VRV／家用一對多：相同顏色的房間視為接同一台室外機，一個負責算連結率、"
+            "一個負責算室內機容量加總去配對。家用一對一／商用一對一：每間房間各自配對自己"
+            "的室外機，跟顏色分組無關，也不會跨家用／商用互相搭配。顏色調整好之後按下面的"
+            "「確認」，系統才會重新配對——改顏色本身不會自動觸發配對。"
         )
         if st.button("✅ 確認：配對室外機", key="confirm_outdoor_match_btn"):
             new_vrv_results = {}
+            new_home_multi_results = {}
             new_oneone_results = {}
 
-            # row_families 已經在上面算過了，這裡直接沿用（依室內機型號分類成 vrv / home / commercial / 不明）
+            # row_families 已經在上面算過了，這裡直接沿用（依室內機型號分類成 vrv / home / home_multi / commercial / 不明）
 
             # VRV：按顏色分組（只算被分類成 vrv 的那些列），沿用連結率邏輯
             if outdoor_units:
@@ -696,6 +717,32 @@ if uploaded:
                         ),
                     }
 
+            # 家用一對多：一台室外機接多台室內機，一樣按顏色分組，但用容量加總配對
+            # （室內機容量加總可以略大於室外機額定容量，取最接近的那一台，見
+            # equipment.py 的 recommend_home_multi_outdoor）
+            if home_multi_outdoor_units:
+                for color in df["顏色"].unique():
+                    group_df = df[
+                        (df["顏色"] == color)
+                        & (df["編號"].astype(str).map(row_families) == "home_multi")
+                    ]
+                    if group_df.empty:
+                        continue
+                    indoor_rows_for_outdoor = [
+                        {
+                            "indoor_model": str(r["室內機型號"]),
+                            "indoor_quantity": int(r["室內機數量"] or 1),
+                        }
+                        for _, r in group_df.iterrows()
+                        if str(r["室內機型號"]).strip()
+                    ]
+                    rec = recommend_home_multi_outdoor(
+                        indoor_rows_for_outdoor,
+                        home_multi_outdoor_units,
+                        home_multi_indoor_units,
+                    )
+                    new_home_multi_results[color] = {"model": rec.get("model") or ""}
+
             # 家用一對一／商用一對一：每一列各自獨立配對，不管顏色
             for _, r in df.iterrows():
                 family = row_families.get(str(r["編號"]))
@@ -704,12 +751,13 @@ if uploaded:
                     continue
                 if family == "home":
                     match = find_closest_outdoor_1to1(indoor_model, home_outdoor_units)
-                    new_oneone_results[str(r["編號"])] = {"model": match.get("model") or ""}
+                    new_oneone_results[str(r["編號"])] = {"model": match.get("model") or "", "family": "home"}
                 elif family == "commercial":
                     match = find_closest_outdoor_1to1(indoor_model, commercial_outdoor_units)
-                    new_oneone_results[str(r["編號"])] = {"model": match.get("model") or ""}
+                    new_oneone_results[str(r["編號"])] = {"model": match.get("model") or "", "family": "commercial"}
 
             st.session_state["outdoor_match_results"] = new_vrv_results
+            st.session_state["home_multi_match_results"] = new_home_multi_results
             st.session_state["oneone_match_results"] = new_oneone_results
 
             # 同色的房間排在一起（穩定排序：同色內維持原本相對順序），
@@ -808,8 +856,51 @@ if uploaded:
             "室內外機資料與連結率；面積與總熱負荷由系統自動計算。"
         )
 
+    def _capacity_candidates(units, demand_kw, low=0.85, high=1.8):
+        """挑出容量大致適合這個熱負荷的機型（demand_kw 的 0.85~1.8 倍範圍內），
+        範圍內完全沒有的話就退回容量最大的那一台頂著用。"""
+        if not units or demand_kw <= 0:
+            return []
+        lo, hi = demand_kw * low, demand_kw * high
+        cands = [u for u in units if lo <= u["capacity_kw"] <= hi]
+        if not cands:
+            cands = sorted(units, key=lambda u: u["capacity_kw"])[-1:]
+        return sorted(cands, key=lambda u: u["capacity_kw"])
+
+    def _build_model_options(demand_kw: float, locked_family: str | None):
+        options = []
+        if locked_family in (None, "vrv"):
+            for u in _capacity_candidates(indoor_units, demand_kw):
+                options.append({"value": u["model"], "label": f"VRV · {u['capacity_kw']:.1f}kW"})
+        if locked_family in (None, "home"):
+            for u in _capacity_candidates(home_indoor_units, demand_kw):
+                options.append({"value": u["model"], "label": f"家用一對一 · {u['capacity_kw']:.1f}kW"})
+        if locked_family in (None, "home_multi"):
+            for u in _capacity_candidates(home_multi_indoor_units, demand_kw):
+                options.append({"value": u["model"], "label": f"家用一對多 · {u['capacity_kw']:.1f}kW"})
+        if locked_family in (None, "commercial"):
+            for u in _capacity_candidates(commercial_indoor_units, demand_kw):
+                options.append({"value": u["model"], "label": f"商用一對一 · {u['capacity_kw']:.1f}kW"})
+        return options
+
     rows_payload = []
     for i, (_, row) in enumerate(df.iterrows()):
+        room_id_str = str(row["編號"])
+
+        # 防呆：這個房間所在的分組已經配對過室外機的話，室內機下拉選單就只能選
+        # 同一個家族的機型；還沒配對過就顯示全部家族混合的選項。
+        locked_family = None
+        oneone_locked = oneone_results.get(room_id_str)
+        if oneone_locked and oneone_locked.get("model"):
+            locked_family = oneone_locked.get("family")
+        elif match_results.get(row["顏色"], {}).get("model"):
+            locked_family = "vrv"
+        elif home_multi_results.get(row["顏色"], {}).get("model"):
+            locked_family = "home_multi"
+
+        demand_kw = float(row["總熱負荷 (kW)"]) if not pd.isna(row["總熱負荷 (kW)"]) else 0.0
+        model_options = _build_model_options(demand_kw, locked_family)
+
         rows_payload.append({
             "room_id": int(row["編號"]),
             "name": str(row["區域名稱"]),
@@ -834,6 +925,7 @@ if uploaded:
                 else float(row["連結率 (%)"])
             ),
             "merge_group": merge_group_ids[i],
+            "model_options": model_options,
         })
 
     table_value = hvac_table(
