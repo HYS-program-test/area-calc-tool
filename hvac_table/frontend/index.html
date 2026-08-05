@@ -259,9 +259,23 @@ function render() {
       modelInput.type = "text";
       modelInput.className = "model-input";
       modelInput.value = r.indoorModel;
+      modelInput.placeholder = "輸入或從下拉選單挑選";
+
+      const datalistId = `model-options-${r.roomId}`;
+      const datalist = document.createElement("datalist");
+      datalist.id = datalistId;
+      (r.modelOptions || []).forEach(opt => {
+        const optionEl = document.createElement("option");
+        optionEl.value = opt.value;
+        optionEl.label = opt.label;
+        datalist.appendChild(optionEl);
+      });
+      modelInput.setAttribute("list", datalistId);
+
       modelInput.addEventListener("input", e => { r.indoorModel = e.target.value; });
       modelInput.addEventListener("change", send);
       tdIndoorModel.appendChild(modelInput);
+      tdIndoorModel.appendChild(datalist);
       tr.appendChild(tdIndoorModel);
 
       const tdQty = document.createElement("td");
@@ -345,6 +359,7 @@ window.addEventListener("message", (event) => {
     outdoorModel: r.outdoor_model || "",
     connectionRate: (r.connection_rate === undefined) ? null : r.connection_rate,
     mergeGroup: r.merge_group,
+    modelOptions: r.model_options || [],
   }));
 
   render();

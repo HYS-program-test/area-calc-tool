@@ -42,6 +42,7 @@ def hvac_table(
             "outdoor_model": str,
             "connection_rate": float | None,
             "merge_group": int,          # 連續同一個值的列會合併成一格（室外機/連結率那欄）
+            "model_options": [{"value": str, "label": str}, ...],  # 室內機型號下拉選單的候選項目
         }, ...
     ]
     palette: 顏色下拉選單的選項（hex 字串列表）
