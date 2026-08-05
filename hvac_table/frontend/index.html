@@ -70,6 +70,29 @@ input.num-input{ width:70px; text-align:right; }
 .merge-cell .rate{ font-size:11.5px; color:var(--muted); margin-top:2px; }
 .merge-cell .rate.warn{ color:#b45309; }
 .merge-cell .empty{ color:#c7ccd1; font-size:11.5px; }
+
+.model-cell-wrap{ position:relative; display:flex; align-items:center; gap:4px; }
+.model-cell-wrap input.model-input{ min-width:120px; }
+.model-dropdown-btn{
+  flex:0 0 auto; width:22px; height:22px; border-radius:6px; border:1px solid #dbe0e6;
+  background:#fff; color:var(--muted); cursor:pointer; font-size:11px;
+  display:flex; align-items:center; justify-content:center;
+}
+.model-dropdown-btn:hover{ border-color:var(--blue); color:var(--blue); }
+.model-dropdown-popup{
+  display:none; position:absolute; top:30px; left:0; z-index:30;
+  background:#fff; border:1px solid var(--border); border-radius:10px;
+  box-shadow:0 6px 18px rgba(0,0,0,0.14); width:220px; max-height:260px; overflow-y:auto;
+}
+.model-dropdown-popup.open{ display:block; }
+.model-option{
+  padding:7px 10px; cursor:pointer; font-size:12px; border-bottom:1px solid #f3f4f6;
+}
+.model-option:last-child{ border-bottom:none; }
+.model-option:hover{ background:var(--blue-pale); }
+.model-option .opt-value{ font-weight:700; color:var(--text); }
+.model-option .opt-label{ font-size:11px; color:var(--muted); margin-top:1px; }
+.model-dropdown-empty{ padding:10px; font-size:12px; color:#c7ccd1; text-align:center; }
 </style>
 </head>
 <body>
@@ -143,8 +166,9 @@ function send() {
   setComponentValue({ updates, nonce: nonceCounter });
 }
 
-function closeAllSwatchPopups() {
-  document.querySelectorAll(".swatch-popup.open").forEach(p => p.classList.remove("open"));
+function closeAllPopups() {
+  document.querySelectorAll(".swatch-popup.open, .model-dropdown-popup.open")
+    .forEach(p => p.classList.remove("open"));
 }
 
 // 事件代理：監聽器只在 #stage 上綁一次，不管 tbody 重繪幾次都不會漏接點擊
@@ -159,25 +183,57 @@ stage.addEventListener("click", (e) => {
     const row = rows.find(r => r.roomId === roomId);
     if (row) {
       row.color = color;
-      closeAllSwatchPopups();
+      closeAllPopups();
       render();
       send();
     }
     return;
   }
 
-  const btn = e.target.closest(".swatch-btn");
-  if (btn) {
+  const swatchBtn = e.target.closest(".swatch-btn");
+  if (swatchBtn) {
     e.stopPropagation();
-    const roomId = Number(btn.dataset.roomId);
+    const roomId = Number(swatchBtn.dataset.roomId);
     const popup = tbody.querySelector(`.swatch-popup[data-room-id="${roomId}"]`);
     const wasOpen = popup && popup.classList.contains("open");
-    closeAllSwatchPopups();
+    closeAllPopups();
     if (popup && !wasOpen) popup.classList.add("open");
+    return;
+  }
+
+  const modelOption = e.target.closest(".model-option");
+  if (modelOption) {
+    e.stopPropagation();
+    const roomId = Number(modelOption.dataset.roomId);
+    const value = modelOption.dataset.value;
+    const row = rows.find(r => r.roomId === roomId);
+    if (row) {
+      row.indoorModel = value;
+      closeAllPopups();
+      render();
+      send();
+    }
+    return;
+  }
+
+  const modelBtn = e.target.closest(".model-dropdown-btn");
+  if (modelBtn) {
+    e.stopPropagation();
+    const roomId = Number(modelBtn.dataset.roomId);
+    const popup = tbody.querySelector(`.model-dropdown-popup[data-room-id="${roomId}"]`);
+    const wasOpen = popup && popup.classList.contains("open");
+    closeAllPopups();
+    if (popup && !wasOpen) popup.classList.add("open");
+    return;
+  }
+
+  // 點輸入框本身（打字）不用特別處理，但點擊表格其他地方要把展開的下拉選單收起來
+  if (!e.target.closest(".model-cell-wrap")) {
+    closeAllPopups();
   }
 });
 
-document.addEventListener("click", () => closeAllSwatchPopups());
+document.addEventListener("click", () => closeAllPopups());
 
 function buildSwatchCellHtml(row) {
   const options = palette.map(color => `
@@ -191,6 +247,19 @@ function buildSwatchCellHtml(row) {
       <div class="swatch-popup" data-room-id="${row.roomId}">${options}</div>
     </div>
   `;
+}
+
+function buildModelOptionsHtml(row) {
+  const opts = row.modelOptions || [];
+  if (!opts.length) {
+    return `<div class="model-dropdown-empty">沒有容量合適的建議機型，可直接手動輸入型號</div>`;
+  }
+  return opts.map(opt => `
+    <div class="model-option" data-room-id="${row.roomId}" data-value="${escapeHtml(opt.value)}">
+      <div class="opt-value">${escapeHtml(opt.value)}</div>
+      <div class="opt-label">${escapeHtml(opt.label || "")}</div>
+    </div>
+  `).join("");
 }
 
 function render() {
@@ -255,27 +324,32 @@ function render() {
       tr.appendChild(tdHeat);
 
       const tdIndoorModel = document.createElement("td");
+      const modelWrap = document.createElement("div");
+      modelWrap.className = "model-cell-wrap";
+
       const modelInput = document.createElement("input");
       modelInput.type = "text";
       modelInput.className = "model-input";
       modelInput.value = r.indoorModel;
-      modelInput.placeholder = "輸入或從下拉選單挑選";
-
-      const datalistId = `model-options-${r.roomId}`;
-      const datalist = document.createElement("datalist");
-      datalist.id = datalistId;
-      (r.modelOptions || []).forEach(opt => {
-        const optionEl = document.createElement("option");
-        optionEl.value = opt.value;
-        optionEl.label = opt.label;
-        datalist.appendChild(optionEl);
-      });
-      modelInput.setAttribute("list", datalistId);
-
+      modelInput.placeholder = "輸入型號或點右邊選單";
       modelInput.addEventListener("input", e => { r.indoorModel = e.target.value; });
       modelInput.addEventListener("change", send);
-      tdIndoorModel.appendChild(modelInput);
-      tdIndoorModel.appendChild(datalist);
+      modelWrap.appendChild(modelInput);
+
+      const modelBtn = document.createElement("div");
+      modelBtn.className = "model-dropdown-btn";
+      modelBtn.textContent = "▾";
+      modelBtn.dataset.roomId = r.roomId;
+      modelBtn.title = "選擇容量合適的機型";
+      modelWrap.appendChild(modelBtn);
+
+      const modelPopup = document.createElement("div");
+      modelPopup.className = "model-dropdown-popup";
+      modelPopup.dataset.roomId = r.roomId;
+      modelPopup.innerHTML = buildModelOptionsHtml(r);
+      modelWrap.appendChild(modelPopup);
+
+      tdIndoorModel.appendChild(modelWrap);
       tr.appendChild(tdIndoorModel);
 
       const tdQty = document.createElement("td");

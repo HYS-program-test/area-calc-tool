@@ -678,101 +678,119 @@ if uploaded:
             "「確認」，系統才會重新配對——改顏色本身不會自動觸發配對。"
         )
         if st.button("✅ 確認：配對室外機", key="confirm_outdoor_match_btn"):
-            new_vrv_results = {}
-            new_home_multi_results = {}
-            new_oneone_results = {}
+            try:
+                new_vrv_results = {}
+                new_home_multi_results = {}
+                new_oneone_results = {}
 
-            # row_families 已經在上面算過了，這裡直接沿用（依室內機型號分類成 vrv / home / home_multi / commercial / 不明）
+                # row_families 已經在上面算過了，這裡直接沿用（依室內機型號分類成 vrv / home / home_multi / commercial / 不明）
 
-            # VRV：按顏色分組（只算被分類成 vrv 的那些列），沿用連結率邏輯
-            if outdoor_units:
-                for color in df["顏色"].unique():
-                    group_df = df[
-                        (df["顏色"] == color)
-                        & (df["編號"].astype(str).map(row_families) == "vrv")
-                    ]
-                    if group_df.empty:
-                        continue
-                    indoor_rows_for_outdoor = [
-                        {
-                            "indoor_model": str(r["室內機型號"]),
-                            "indoor_quantity": int(r["室內機數量"] or 1),
+                # VRV：按顏色分組（只算被分類成 vrv 的那些列），沿用連結率邏輯
+                if outdoor_units:
+                    for color in df["顏色"].unique():
+                        group_df = df[
+                            (df["顏色"] == color)
+                            & (df["編號"].astype(str).map(row_families) == "vrv")
+                        ]
+                        if group_df.empty:
+                            continue
+                        indoor_rows_for_outdoor = [
+                            {
+                                "indoor_model": str(r["室內機型號"]),
+                                "indoor_quantity": int(r["室內機數量"]) if not pd.isna(r["室內機數量"]) else 1,
+                            }
+                            for _, r in group_df.iterrows()
+                            if str(r["室內機型號"]).strip()
+                        ]
+                        rec = recommend_outdoor(
+                            indoor_rows_for_outdoor,
+                            outdoor_units,
+                            indoor_units,
+                            min_rate=105.0,
+                            max_rate=110.0,
+                        )
+                        new_vrv_results[color] = {
+                            "model": rec.get("model") or "",
+                            "rate": (
+                                round(rec["connection_rate"], 1)
+                                if rec.get("connection_rate") is not None
+                                else None
+                            ),
                         }
-                        for _, r in group_df.iterrows()
-                        if str(r["室內機型號"]).strip()
-                    ]
-                    rec = recommend_outdoor(
-                        indoor_rows_for_outdoor,
-                        outdoor_units,
-                        indoor_units,
-                        min_rate=105.0,
-                        max_rate=110.0,
-                    )
-                    new_vrv_results[color] = {
-                        "model": rec.get("model") or "",
-                        "rate": (
-                            round(rec["connection_rate"], 1)
-                            if rec.get("connection_rate") is not None
-                            else None
-                        ),
-                    }
 
-            # 家用一對多：一台室外機接多台室內機，一樣按顏色分組，但用容量加總配對
-            # （室內機容量加總可以略大於室外機額定容量，取最接近的那一台，見
-            # equipment.py 的 recommend_home_multi_outdoor）
-            if home_multi_outdoor_units:
-                for color in df["顏色"].unique():
-                    group_df = df[
-                        (df["顏色"] == color)
-                        & (df["編號"].astype(str).map(row_families) == "home_multi")
-                    ]
-                    if group_df.empty:
+                # 家用一對多：一台室外機接多台室內機，一樣按顏色分組，但用容量加總配對
+                # （室內機容量加總可以略大於室外機額定容量，取最接近的那一台，見
+                # equipment.py 的 recommend_home_multi_outdoor）
+                if home_multi_outdoor_units:
+                    for color in df["顏色"].unique():
+                        group_df = df[
+                            (df["顏色"] == color)
+                            & (df["編號"].astype(str).map(row_families) == "home_multi")
+                        ]
+                        if group_df.empty:
+                            continue
+                        indoor_rows_for_outdoor = [
+                            {
+                                "indoor_model": str(r["室內機型號"]),
+                                "indoor_quantity": int(r["室內機數量"]) if not pd.isna(r["室內機數量"]) else 1,
+                            }
+                            for _, r in group_df.iterrows()
+                            if str(r["室內機型號"]).strip()
+                        ]
+                        rec = recommend_home_multi_outdoor(
+                            indoor_rows_for_outdoor,
+                            home_multi_outdoor_units,
+                            home_multi_indoor_units,
+                        )
+                        new_home_multi_results[color] = {"model": rec.get("model") or ""}
+
+                # 家用一對一／商用一對一：每一列各自獨立配對，不管顏色
+                for _, r in df.iterrows():
+                    family = row_families.get(str(r["編號"]))
+                    indoor_model = str(r["室內機型號"]).strip()
+                    if not indoor_model:
                         continue
-                    indoor_rows_for_outdoor = [
-                        {
-                            "indoor_model": str(r["室內機型號"]),
-                            "indoor_quantity": int(r["室內機數量"] or 1),
-                        }
-                        for _, r in group_df.iterrows()
-                        if str(r["室內機型號"]).strip()
-                    ]
-                    rec = recommend_home_multi_outdoor(
-                        indoor_rows_for_outdoor,
-                        home_multi_outdoor_units,
-                        home_multi_indoor_units,
-                    )
-                    new_home_multi_results[color] = {"model": rec.get("model") or ""}
+                    if family == "home":
+                        match = find_closest_outdoor_1to1(indoor_model, home_outdoor_units)
+                        new_oneone_results[str(r["編號"])] = {"model": match.get("model") or "", "family": "home"}
+                    elif family == "commercial":
+                        match = find_closest_outdoor_1to1(indoor_model, commercial_outdoor_units)
+                        new_oneone_results[str(r["編號"])] = {"model": match.get("model") or "", "family": "commercial"}
 
-            # 家用一對一／商用一對一：每一列各自獨立配對，不管顏色
-            for _, r in df.iterrows():
-                family = row_families.get(str(r["編號"]))
-                indoor_model = str(r["室內機型號"]).strip()
-                if not indoor_model:
-                    continue
-                if family == "home":
-                    match = find_closest_outdoor_1to1(indoor_model, home_outdoor_units)
-                    new_oneone_results[str(r["編號"])] = {"model": match.get("model") or "", "family": "home"}
-                elif family == "commercial":
-                    match = find_closest_outdoor_1to1(indoor_model, commercial_outdoor_units)
-                    new_oneone_results[str(r["編號"])] = {"model": match.get("model") or "", "family": "commercial"}
+                st.session_state["outdoor_match_results"] = new_vrv_results
+                st.session_state["home_multi_match_results"] = new_home_multi_results
+                st.session_state["oneone_match_results"] = new_oneone_results
 
-            st.session_state["outdoor_match_results"] = new_vrv_results
-            st.session_state["home_multi_match_results"] = new_home_multi_results
-            st.session_state["oneone_match_results"] = new_oneone_results
+                # 除錯用摘要：不管配對結果好不好，至少讓你知道「這次真的有跑」以及跑出了什麼，
+                # 不用再猜是按鈕沒反應還是配對結果剛好是空的。存進 session_state 是因為
+                # 下面馬上就會 st.rerun()，一般的 st.success() 訊息在那之前就會被清掉看不到。
+                vrv_matched = sum(1 for v in new_vrv_results.values() if v.get("model"))
+                hm_matched = sum(1 for v in new_home_multi_results.values() if v.get("model"))
+                oneone_matched = sum(1 for v in new_oneone_results.values() if v.get("model"))
+                st.session_state["outdoor_match_summary"] = (
+                    f"這次確認：VRV 配對成功 {vrv_matched}／{len(new_vrv_results)} 組顏色分組；"
+                    f"家用一對多配對成功 {hm_matched}／{len(new_home_multi_results)} 組顏色分組；"
+                    f"一對一（家用/商用）配對成功 {oneone_matched}／{len(new_oneone_results)} 間房間。"
+                )
 
-            # 同色的房間排在一起（穩定排序：同色內維持原本相對順序），
-            # 房間列表跟下面的試算表都是從 st.session_state["rooms"] 這個順序畫出來的，
-            # 所以排這裡兩邊會一起變。（一對一房間也會照顏色一起排到視覺上，
-            # 但室外機配對本身跟顏色無關，純粹排序方便看。）
-            sorted_df = df.sort_values("顏色", kind="stable")
-            new_rooms_order = []
-            for rid in sorted_df["編號"].tolist():
-                room = room_by_id_for_selection.get(str(rid))
-                if room is not None:
-                    new_rooms_order.append(room)
-            st.session_state["rooms"] = new_rooms_order
+                # 同色的房間排在一起（穩定排序：同色內維持原本相對順序），
+                # 房間列表跟下面的試算表都是從 st.session_state["rooms"] 這個順序畫出來的，
+                # 所以排這裡兩邊會一起變。（一對一房間也會照顏色一起排到視覺上，
+                # 但室外機配對本身跟顏色無關，純粹排序方便看。）
+                sorted_df = df.sort_values("顏色", kind="stable")
+                new_rooms_order = []
+                for rid in sorted_df["編號"].tolist():
+                    room = room_by_id_for_selection.get(str(rid))
+                    if room is not None:
+                        new_rooms_order.append(room)
+                st.session_state["rooms"] = new_rooms_order
 
-            st.rerun()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"配對室外機時發生錯誤：{exc}")
+
+        if st.session_state.get("outdoor_match_summary"):
+            st.caption(f"🔍 {st.session_state['outdoor_match_summary']}")
 
     st.session_state["rooms"] = list(
         room_by_id_for_selection.values()
