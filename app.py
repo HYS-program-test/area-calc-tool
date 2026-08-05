@@ -432,19 +432,30 @@ if uploaded:
         欄位），如果整包覆蓋回 session_state，會把選機表那邊剛更新的資料蓋掉
         （這就是「選了家用一對多、按確認後又跳回VRV」的成因）。改成只同步
         points/color 這兩個真的屬於圖面編輯區的欄位，其餘欄位保留 session_state
-        裡目前最新的值；新增/刪除的房間則整個採用圖面編輯區的版本。"""
+        裡目前最新的值；順序也是以 session_state 目前的順序為準（例如剛排序過的
+        結果），不是圖面編輯區回傳的順序——不然「確認：配對室外機」排好序之後，
+        下一輪又會被圖面編輯區那份沒跟上排序的舊順序蓋回去，等於排序被默默復原掉。
+        房間存不存在（有沒有被刪除、有沒有新增）才是看圖面編輯區的版本。"""
+        editor_by_id = {str(r.get("id")): r for r in editor_rooms}
         current_by_id = {str(r.get("id")): r for r in current_rooms}
+
         merged = []
+        for current_room in current_rooms:
+            rid = str(current_room.get("id"))
+            editor_room = editor_by_id.get(rid)
+            if editor_room is None:
+                continue  # 圖面編輯區裡已經被刪除了，跟著移除
+            merged_room = dict(current_room)
+            merged_room["points"] = editor_room.get("points", current_room.get("points"))
+            merged_room["color"] = editor_room.get("color", current_room.get("color"))
+            merged.append(merged_room)
+
+        # 圖面編輯區新增的房間（session_state 裡還沒有的 id），接在後面
         for editor_room in editor_rooms:
             rid = str(editor_room.get("id"))
-            current_room = current_by_id.get(rid)
-            if current_room is not None:
-                merged_room = dict(current_room)
-                merged_room["points"] = editor_room.get("points", current_room.get("points"))
-                merged_room["color"] = editor_room.get("color", current_room.get("color"))
-                merged.append(merged_room)
-            else:
+            if rid not in current_by_id:
                 merged.append(editor_room)
+
         return merged
 
     if isinstance(editor_value, dict) and "rooms" in editor_value:
