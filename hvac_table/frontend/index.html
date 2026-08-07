@@ -86,12 +86,27 @@ input.num-input{ width:70px; text-align:right; }
 }
 .model-dropdown-popup.open{ display:block; }
 .model-option{
-  padding:7px 10px; cursor:pointer; font-size:12px; border-bottom:1px solid #f3f4f6;
+  padding:8px 10px; cursor:pointer; font-size:12px; border-bottom:1px solid #f3f4f6;
 }
 .model-option:last-child{ border-bottom:none; }
 .model-option:hover{ background:var(--blue-pale); }
-.model-option .opt-value{ font-weight:700; color:var(--text); }
-.model-option .opt-label{ font-size:11px; color:var(--muted); margin-top:1px; }
+.model-option .opt-value{ font-weight:700; color:var(--text); font-size:13px; }
+.model-option .opt-cap{ font-size:11px; color:var(--muted); margin-top:1px; }
+.family-badge{
+  display:inline-block; font-size:12px; font-weight:800; padding:2px 8px;
+  border-radius:6px; margin-bottom:3px; letter-spacing:.2px;
+}
+.family-badge.fam-vrv{ background:#dbeafe; color:#1d4ed8; }
+.family-badge.fam-home{ background:#dcfce7; color:#15803d; }
+.family-badge.fam-home_multi{ background:#ffedd5; color:#c2410c; }
+.family-badge.fam-commercial{ background:#f3e8ff; color:#7e22ce; }
+.model-group-header{
+  padding:5px 10px; font-size:11px; font-weight:700; color:#fff; letter-spacing:.3px;
+}
+.model-group-header.fam-vrv{ background:#2563eb; }
+.model-group-header.fam-home{ background:#16a34a; }
+.model-group-header.fam-home_multi{ background:#ea580c; }
+.model-group-header.fam-commercial{ background:#9333ea; }
 .model-dropdown-empty{ padding:10px; font-size:12px; color:#c7ccd1; text-align:center; }
 </style>
 </head>
@@ -249,17 +264,41 @@ function buildSwatchCellHtml(row) {
   `;
 }
 
+const FAMILY_CSS_CLASS = {
+  "VRV": "fam-vrv",
+  "家用一對一": "fam-home",
+  "家用一對多": "fam-home_multi",
+  "商用一對一": "fam-commercial",
+};
+
 function buildModelOptionsHtml(row) {
   const opts = row.modelOptions || [];
   if (!opts.length) {
     return `<div class="model-dropdown-empty">沒有容量合適的建議機型，可直接手動輸入型號</div>`;
   }
-  return opts.map(opt => `
-    <div class="model-option" data-room-id="${row.roomId}" data-value="${escapeHtml(opt.value)}">
-      <div class="opt-value">${escapeHtml(opt.value)}</div>
-      <div class="opt-label">${escapeHtml(opt.label || "")}</div>
-    </div>
-  `).join("");
+
+  // 依家族分組顯示，每組上面一個大色塊標題，同一家族的選項不會跟別家混在一起看
+  const groups = [];
+  opts.forEach(opt => {
+    let group = groups.find(g => g.family === opt.family);
+    if (!group) {
+      group = { family: opt.family, items: [] };
+      groups.push(group);
+    }
+    group.items.push(opt);
+  });
+
+  return groups.map(group => {
+    const cls = FAMILY_CSS_CLASS[group.family] || "fam-vrv";
+    const header = `<div class="model-group-header ${cls}">${escapeHtml(group.family)}</div>`;
+    const items = group.items.map(opt => `
+      <div class="model-option" data-room-id="${row.roomId}" data-value="${escapeHtml(opt.value)}">
+        <div class="opt-value">${escapeHtml(opt.value)}</div>
+        <div class="opt-cap">${opt.capacity_kw != null ? opt.capacity_kw.toFixed(1) + " kW" : ""}</div>
+      </div>
+    `).join("");
+    return header + items;
+  }).join("");
 }
 
 function render() {

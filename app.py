@@ -924,16 +924,16 @@ if uploaded:
         options = []
         if locked_family in (None, "vrv"):
             for u in _capacity_candidates(indoor_units, demand_kw):
-                options.append({"value": u["model"], "label": f"VRV · {u['capacity_kw']:.1f}kW"})
+                options.append({"value": u["model"], "family": "VRV", "capacity_kw": u["capacity_kw"]})
         if locked_family in (None, "home"):
             for u in _capacity_candidates(home_indoor_units, demand_kw):
-                options.append({"value": u["model"], "label": f"家用一對一 · {u['capacity_kw']:.1f}kW"})
+                options.append({"value": u["model"], "family": "家用一對一", "capacity_kw": u["capacity_kw"]})
         if locked_family in (None, "home_multi"):
             for u in _capacity_candidates(home_multi_indoor_units, demand_kw):
-                options.append({"value": u["model"], "label": f"家用一對多 · {u['capacity_kw']:.1f}kW"})
+                options.append({"value": u["model"], "family": "家用一對多", "capacity_kw": u["capacity_kw"]})
         if locked_family in (None, "commercial"):
             for u in _capacity_candidates(commercial_indoor_units, demand_kw):
-                options.append({"value": u["model"], "label": f"商用一對一 · {u['capacity_kw']:.1f}kW"})
+                options.append({"value": u["model"], "family": "商用一對一", "capacity_kw": u["capacity_kw"]})
         return options
 
     rows_payload = []
