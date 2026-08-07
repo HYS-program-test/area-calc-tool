@@ -114,6 +114,28 @@ def load_equipment(
                 row.iloc[6] if len(row) > 6 else None
             )
 
+            capacity_inferred = False
+            _normalized_category = category.replace(" ", "")
+            _infer_ok_categories = (
+                "家用一對一室外機", "家用一對一室內機",
+                "家用一對多室外機", "家用一對多室內機",
+                "商用一對一室外機", "商用一對一室內機",
+            )
+            if (
+                (capacity_kw is None or capacity_kw <= 0)
+                and model
+                and _normalized_category in _infer_ok_categories
+            ):
+                # 這三個類別的 G 欄冷氣能力常常是空的，但型號數字本身就是額定容量的
+                # 慣例寫法（例如 2MXM56YVLT → 5.6kW、RXM22ZVLT → 2.2kW），G 欄沒填
+                # 就用這個規律推算。注意：這個推算只適用這三個類別，VRV 的型號數字
+                # 規則不一樣（例如水冷 VRV 型號結尾數字不是容量），不能套用同一套規則，
+                # 所以刻意排除在外，VRV 沒有 G 欄資料的列還是照舊濾掉、不用猜的。
+                inferred_number = model_number(model)
+                if inferred_number:
+                    capacity_kw = round(inferred_number / 10.0, 2)
+                    capacity_inferred = True
+
             if not model or capacity_kw is None or capacity_kw <= 0:
                 continue
 
@@ -134,6 +156,7 @@ def load_equipment(
                 "type": equipment_type,
                 "model": model,
                 "capacity_kw": float(capacity_kw),
+                "capacity_inferred": capacity_inferred,
                 "connection_models": connection_models,
                 "connection_index": connection_index,
                 "sheet": sheet_name,
